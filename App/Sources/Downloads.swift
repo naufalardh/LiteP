@@ -94,10 +94,22 @@ final class DownloadManager {
                 } else if result["success"] as? Bool == true {
                     let reported = result.str("file_path")
                     if let path = Self.placeInLibrary(reported) {
+                        let finished = result["already_exists"] as? Bool == true ? "Done · already in library" : "Done"
+                        let opus = OpusRemux.extensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased())
                         job.filePath = path
-                        job.status = result["already_exists"] as? Bool == true ? "Done · already in library" : "Done"
+                        job.status = opus ? "Converting to AAC…" : finished
                         job.progress = 1
                         job.detail = Self.describe(result, path)
+                        LibraryStore.shared.importDownload(path) { saved in
+                            if let saved = saved {
+                                job.filePath = saved
+                                job.status = finished
+                                job.detail = Self.describe(result, saved) + (opus ? " · converted from Opus" : "")
+                            } else {
+                                job.status = "Failed: could not convert Opus to AAC"
+                            }
+                            self.notify()
+                        }
                     } else {
                         job.status = "Failed: extension said done but no file was saved"
                         job.detail = reported.isEmpty ? "No file path returned" : "Missing: \(reported)"
@@ -111,7 +123,6 @@ final class DownloadManager {
             Lite.shared.call("clearItemProgress", ["item_id": job.id])
             self.running = false
             self.notify()
-            if !job.filePath.isEmpty { LibraryStore.shared.scan {} }
             if verify { self.verifyAndRetry(job) }
             if !self.jobs.contains(where: { !$0.done }) { self.stopPolling() }
             self.pump()
@@ -151,9 +162,7 @@ final class DownloadManager {
         if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber {
             parts.append(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))
         }
-        if OpusRemux.extensions.contains(url.pathExtension.lowercased()) {
-            parts.append("Opus, converted to AAC .m4a for iOS 12")
-        } else if !LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) {
+        if !OpusRemux.extensions.contains(url.pathExtension.lowercased()), !LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) {
             parts.append(".\(url.pathExtension) can't play on iOS 12")
         }
         parts.append(url.lastPathComponent)
