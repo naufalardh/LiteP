@@ -1,42 +1,47 @@
 import UIKit
 
-final class SearchViewController: UITableViewController, UISearchBarDelegate {
-    private struct Group { let name: String; let detail: String; let tracks: [Track] }
+private struct SearchGroup { let name: String; let detail: String; let tracks: [Track] }
 
+final class SearchViewController: UITableViewController, UISearchBarDelegate {
     private let searchBar = UISearchBar()
-    private let modes = UISegmentedControl(items: ["Songs", "Artists", "Albums"])
+    private let pills = PillBar(["Songs", "Artists", "Albums"])
     private var results: [Track] = []
-    private var opened: Group?
     private var sourceId = ""
-    private var message = "Add a repository and install extensions in the Extensions tab, then search here."
+    private var message = ""
+    private var recent: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "recentSearches") ?? [] }
+        set { UserDefaults.standard.set(Array(newValue.prefix(12)), forKey: "recentSearches") }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Search"
-        searchBar.placeholder = "Songs, artists, albums"
+        searchBar.placeholder = "What do you want to listen to?"
         searchBar.delegate = self
-        searchBar.sizeToFit()
-        tableView.tableHeaderView = searchBar
-        tableView.rowHeight = 56
+        searchBar.searchBarStyle = .minimal
+        searchBar.frame = CGRect(x: 8, y: 0, width: 304, height: 52)
+        searchBar.autoresizingMask = .flexibleWidth
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 104))
+        header.backgroundColor = Theme.bg
+        pills.frame.origin.y = 52
+        header.addSubview(searchBar)
+        header.addSubview(pills)
+        tableView.tableHeaderView = header
+        searchBar.frame.size.width = view.bounds.width - 16
+        pills.frame.size.width = view.bounds.width
+        pills.changed = { [weak self] _ in self?.tableView.reloadData() }
+        tableView.rowHeight = 64
+        tableView.separatorStyle = .none
         tableView.keyboardDismissMode = .onDrag
-        modes.selectedSegmentIndex = 0
-        modes.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
-        navigationItem.titleView = modes
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Source", style: .plain, target: self, action: #selector(pickSource))
         NotificationCenter.default.addObserver(self, selector: #selector(updateSource), name: Lite.extensionsChanged, object: nil)
         updateSource()
     }
 
-    @objc private func modeChanged() { close() }
+    private var mode: Int { pills.selected }
 
-    @objc private func close() {
-        opened = nil
-        navigationItem.leftBarButtonItem = nil
-        tableView.reloadData()
-    }
-
-    private var groups: [Group] {
-        let artists = modes.selectedSegmentIndex == 1
+    private var groups: [SearchGroup] {
+        let artists = mode == 1
         var order: [String] = []
         var map: [String: [Track]] = [:]
         for track in results {
@@ -47,14 +52,12 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         }
         return order.map { k in
             let tracks = map[k] ?? []
-            let count = "\(tracks.count) song\(tracks.count == 1 ? "" : "s")"
-            guard !artists, let first = tracks.first else { return Group(name: k, detail: count, tracks: tracks) }
-            return Group(name: first.album, detail: "\(first.primaryArtist) · \(count)", tracks: tracks)
+            guard !artists, let first = tracks.first else { return SearchGroup(name: k, detail: "Artist", tracks: tracks) }
+            return SearchGroup(name: first.album, detail: "Album · \(first.primaryArtist)", tracks: tracks)
         }
     }
 
-    private var showingGroups: Bool { opened == nil && modes.selectedSegmentIndex != 0 }
-    private var tracks: [Track] { opened?.tracks ?? results }
+    private var showingRecent: Bool { results.isEmpty && message.isEmpty }
 
     @objc private func updateSource() {
         let match = Lite.shared.searchExtensions.first { $0.str("id") == sourceId }
@@ -73,17 +76,34 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         present(sheet, animated: true)
     }
 
+    func searchBar(_ bar: UISearchBar, textDidChange text: String) {
+        if text.isEmpty {
+            results = []
+            message = ""
+            tableView.reloadData()
+        }
+    }
+
     func searchBarSearchButtonClicked(_ bar: UISearchBar) {
         bar.resignFirstResponder()
-        let query = (bar.text ?? "").trimmingCharacters(in: .whitespaces)
+        run((bar.text ?? "").trimmingCharacters(in: .whitespaces))
+    }
+
+    private func run(_ query: String) {
         guard !query.isEmpty else { return }
+        recent = [query] + recent.filter { $0.lowercased() != query.lowercased() }
+        if Lite.shared.searchExtensions.isEmpty {
+            message = "Install a search extension first: Home › top-right button, or Settings › Extensions."
+            tableView.reloadData()
+            return
+        }
         message = "Searching…"
         results = []
-        close()
+        tableView.reloadData()
         let done: (Any?, Error?) -> Void = { [weak self] value, error in
             guard let self = self else { return }
             self.results = jsonList(value).map { Track(raw: $0) }
-            self.message = error?.localizedDescription ?? (self.results.isEmpty ? "No results" : "")
+            self.message = error?.localizedDescription ?? (self.results.isEmpty ? "No results for \"\(query)\"" : "")
             self.tableView.reloadData()
         }
         if sourceId.isEmpty {
@@ -97,110 +117,149 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         }
     }
 
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { opened?.name }
-
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        if showingGroups { return max(groups.count, 1) }
-        return opened != nil ? tracks.count + 1 : max(tracks.count, 1)
+        if showingRecent { return recent.isEmpty ? 0 : recent.count + 1 }
+        if !message.isEmpty { return 1 }
+        return mode == 0 ? results.count : max(groups.count, 1)
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "s") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "s")
-        cell.detailTextLabel?.textColor = .gray
-        cell.textLabel?.numberOfLines = 1
-        cell.textLabel?.textColor = .black
-        cell.selectionStyle = .default
-        cell.accessoryType = .none
-        let empty = showingGroups ? groups.isEmpty : (opened == nil && tracks.isEmpty)
-        if empty {
-            cell.textLabel?.text = message.isEmpty ? "No results" : message
+        if showingRecent || !message.isEmpty || (mode != 0 && groups.isEmpty) {
+            let cell = tableView.dequeueReusableCell(withIdentifier: "t") ?? UITableViewCell(style: .default, reuseIdentifier: "t")
+            Theme.style(cell)
             cell.textLabel?.numberOfLines = 0
-            cell.textLabel?.textColor = .gray
-            cell.detailTextLabel?.text = nil
-            cell.selectionStyle = .none
+            if showingRecent {
+                let header = indexPath.row == 0
+                cell.textLabel?.text = header ? "Recent searches" : recent[indexPath.row - 1]
+                cell.textLabel?.font = header ? .systemFont(ofSize: 18, weight: .bold) : .systemFont(ofSize: 16)
+                cell.selectionStyle = header ? .none : .default
+            } else {
+                cell.textLabel?.text = message.isEmpty ? "No results" : message
+                cell.textLabel?.font = .systemFont(ofSize: 15)
+                cell.textLabel?.textColor = Theme.subtext
+                cell.selectionStyle = .none
+            }
             return cell
         }
-        if showingGroups {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        if mode == 0 {
+            let track = results[indexPath.row]
+            Art.set(cell.art, path: nil, url: track.coverURL, size: 50)
+            cell.set(track.title, "Song · \(track.artist)")
+            cell.onMore = { [weak self] v in self?.download([track], from: v) }
+        } else {
             let group = groups[indexPath.row]
-            cell.textLabel?.text = group.name
-            cell.detailTextLabel?.text = group.detail
-            cell.accessoryType = .disclosureIndicator
-            return cell
+            cell.round = mode == 1
+            Art.set(cell.art, path: nil, url: group.tracks.first?.coverURL, size: 50, placeholder: mode == 1 ? .person : .music)
+            cell.set(group.name, group.detail)
         }
-        if opened != nil && indexPath.row == 0 {
-            cell.textLabel?.text = "Download all (\(tracks.count))"
-            cell.textLabel?.textColor = view.tintColor
-            cell.detailTextLabel?.text = nil
-            return cell
-        }
-        let track = tracks[indexPath.row - (opened != nil ? 1 : 0)]
-        cell.textLabel?.text = track.title
-        cell.detailTextLabel?.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        let cell = tableView.cellForRow(at: indexPath)
-        if showingGroups {
-            guard groups.indices.contains(indexPath.row) else { return }
-            opened = groups[indexPath.row]
-            navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Back", style: .plain, target: self, action: #selector(close))
-            tableView.reloadData()
-            if modes.selectedSegmentIndex == 2, let group = opened { loadFullAlbum(group) }
-            return
+        if showingRecent {
+            guard indexPath.row > 0 else { return }
+            searchBar.text = recent[indexPath.row - 1]
+            return run(recent[indexPath.row - 1])
         }
-        if opened != nil && indexPath.row == 0 { return pickProvider(tracks, cell) }
-        let index = indexPath.row - (opened != nil ? 1 : 0)
-        guard tracks.indices.contains(index) else { return }
-        pickProvider([tracks[index]], cell)
+        guard message.isEmpty else { return }
+        if mode == 0 {
+            return download([results[indexPath.row]], from: tableView.cellForRow(at: indexPath))
+        }
+        guard groups.indices.contains(indexPath.row) else { return }
+        navigationController?.pushViewController(RemoteTracksViewController(groups[indexPath.row], album: mode == 2), animated: true)
     }
 
+    override func tableView(_ tableView: UITableView,
+                            trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
+        guard showingRecent, indexPath.row > 0 else { return nil }
+        let remove = UIContextualAction(style: .destructive, title: "Remove") { _, _, done in
+            self.recent.remove(at: indexPath.row - 1)
+            tableView.reloadData()
+            done(true)
+        }
+        return UISwipeActionsConfiguration(actions: [remove])
+    }
+}
+
+/// Songs of an artist or album from search, with Download all.
+private final class RemoteTracksViewController: UITableViewController {
+    private var group: SearchGroup
+    private let album: Bool
+    private var header: DetailHeader!
+
+    init(_ group: SearchGroup, album: Bool) {
+        self.group = group
+        self.album = album
+        super.init(style: .plain)
+        title = group.name
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        navigationItem.largeTitleDisplayMode = .never
+        tableView.rowHeight = 60
+        tableView.separatorStyle = .none
+        header = DetailHeader(width: view.bounds.width, round: !album, action: .download)
+        header.shuffle.isHidden = true
+        header.action.addTarget(self, action: #selector(downloadAll), for: .touchUpInside)
+        Art.set(header.art, path: nil, url: group.tracks.first?.coverURL, size: 220, placeholder: album ? .music : .person)
+        tableView.tableHeaderView = header
+        refresh()
+        if album { loadFullAlbum() }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if header.frame.width != tableView.bounds.width { refresh() }
+    }
+
+    private func refresh() {
+        header.titleLabel.text = group.name
+        header.subtitleLabel.text = "\(group.detail) · \(songCount(group.tracks.count)) · tap ↓ to download all"
+        header.frame.size = CGSize(width: tableView.bounds.width, height: header.layout(tableView.bounds.width))
+        tableView.tableHeaderView = header
+        tableView.reloadData()
+    }
+
+    @objc private func downloadAll() { download(group.tracks, from: header.action) }
+
     /// Search only returns matching songs, so fetch the album itself to list every track.
-    private func loadFullAlbum(_ group: Group) {
+    private func loadFullAlbum() {
         guard let first = group.tracks.first, !first.albumId.isEmpty, !first.source.isEmpty else { return }
         Lite.shared.call("getProviderMetadata", ["provider_id": first.source, "resource_type": "album",
                                                  "resource_id": first.albumId]) { [weak self] value, error in
-            guard let self = self, self.opened?.name == group.name else { return }
+            guard let self = self else { return }
             let list = jsonList(jsonMap(value)["track_list"]).map { raw -> Track in
                 var raw = raw
                 if raw.str("source").isEmpty && raw.str("provider_id").isEmpty { raw["provider_id"] = first.source }
+                if raw.str("cover_url").isEmpty && raw["images"] == nil { raw["cover_url"] = first.coverURL }
                 return Track(raw: raw)
             }
-            guard error == nil, list.count > group.tracks.count else { return }
-            let count = "\(list.count) song\(list.count == 1 ? "" : "s")"
-            self.opened = Group(name: group.name, detail: "\(first.primaryArtist) · \(count)", tracks: list)
-            self.tableView.reloadData()
+            guard error == nil, list.count > self.group.tracks.count else { return }
+            self.group = SearchGroup(name: self.group.name, detail: self.group.detail, tracks: list)
+            self.refresh()
         }
     }
 
-    private func pickProvider(_ tracks: [Track], _ cell: UITableViewCell?) {
-        let providers = Lite.shared.downloadExtensions
-        guard !providers.isEmpty else {
-            alert("No download extension", "Install and enable an extension with a download provider first.")
-            return
-        }
-        let sheet = UIAlertController(title: "Download with", message: tracks.count == 1 ? tracks[0].title : "\(tracks.count) songs",
-                                      preferredStyle: .actionSheet)
-        for ext in providers {
-            sheet.addAction(UIAlertAction(title: ext.extName, style: .default) { _ in self.pickQuality(tracks, ext, cell) })
-        }
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        present(sheet, from: cell)
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { group.tracks.count }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        let track = group.tracks[indexPath.row]
+        cell.showsArt = !album
+        if !album { Art.set(cell.art, path: nil, url: track.coverURL, size: 46) }
+        cell.set(track.title, album ? track.artist : "\(track.artist) · \(track.album)")
+        cell.onMore = { [weak self] v in self?.download([track], from: v) }
+        return cell
     }
 
-    private func pickQuality(_ tracks: [Track], _ ext: [String: Any], _ cell: UITableViewCell?) {
-        let options = ext["quality_options"] as? [[String: Any]] ?? []
-        let id = ext.str("id")
-        let enqueue = { (quality: String) in tracks.forEach { DownloadManager.shared.enqueue($0, provider: id, quality: quality) } }
-        guard options.count > 1 else { return enqueue(options.first?.str("id") ?? "LOSSLESS") }
-        let sheet = UIAlertController(title: "Quality", message: nil, preferredStyle: .actionSheet)
-        for option in options {
-            let label = option.str("label").isEmpty ? option.str("id") : option.str("label")
-            sheet.addAction(UIAlertAction(title: label, style: .default) { _ in enqueue(option.str("id")) })
-        }
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        present(sheet, from: cell)
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        download([group.tracks[indexPath.row]], from: tableView.cellForRow(at: indexPath))
     }
 }
 
@@ -217,5 +276,35 @@ extension UIViewController {
             popover.sourceRect = (view ?? self.view).bounds
         }
         present(sheet, animated: true)
+    }
+
+    /// Asks which download extension and quality to use, then queues the tracks.
+    func download(_ tracks: [Track], from view: UIView?) {
+        let providers = Lite.shared.downloadExtensions
+        guard !providers.isEmpty else {
+            alert("No download extension", "Install and enable an extension with a download provider first.")
+            return
+        }
+        let sheet = UIAlertController(title: "Download with", message: tracks.count == 1 ? tracks[0].title : songCount(tracks.count),
+                                      preferredStyle: .actionSheet)
+        for ext in providers {
+            sheet.addAction(UIAlertAction(title: ext.extName, style: .default) { _ in self.pickQuality(tracks, ext, view) })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(sheet, from: view)
+    }
+
+    private func pickQuality(_ tracks: [Track], _ ext: [String: Any], _ view: UIView?) {
+        let options = ext["quality_options"] as? [[String: Any]] ?? []
+        let id = ext.str("id")
+        let enqueue = { (quality: String) in tracks.forEach { DownloadManager.shared.enqueue($0, provider: id, quality: quality) } }
+        guard options.count > 1 else { return enqueue(options.first?.str("id") ?? "LOSSLESS") }
+        let sheet = UIAlertController(title: "Quality", message: nil, preferredStyle: .actionSheet)
+        for option in options {
+            let label = option.str("label").isEmpty ? option.str("id") : option.str("label")
+            sheet.addAction(UIAlertAction(title: label, style: .default) { _ in enqueue(option.str("id")) })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(sheet, from: view)
     }
 }

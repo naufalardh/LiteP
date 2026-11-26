@@ -3,7 +3,7 @@ import UIKit
 final class SettingsViewController: UITableViewController {
     private var musicSize = "…"
     private var cacheSize = "…"
-    private let rows = [["Music", "Cache"], ["Clear cache", "Rescan library", "Clear finished downloads"], ["Version"]]
+    private let rows = [["Extensions & repositories"], ["Music", "Cache"], ["Clear cache", "Rescan library", "Clear finished downloads"], ["Version"]]
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -56,18 +56,21 @@ final class SettingsViewController: UITableViewController {
     override func numberOfSections(in tableView: UITableView) -> Int { rows.count }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows[section].count }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        ["Storage", nil, "About"][section]
+        [nil, "Storage", nil, "About"][section]
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+        Theme.style(cell)
+        cell.backgroundColor = UIColor(white: 0.11, alpha: 1)
         cell.textLabel?.text = rows[indexPath.section][indexPath.row]
-        cell.selectionStyle = indexPath.section == 1 ? .default : .none
+        cell.selectionStyle = indexPath.section == 0 || indexPath.section == 2 ? .default : .none
         switch (indexPath.section, indexPath.row) {
-        case (0, 0): cell.detailTextLabel?.text = musicSize
-        case (0, 1): cell.detailTextLabel?.text = cacheSize
-        case (1, 0): cell.textLabel?.textColor = .red
-        case (1, _): cell.textLabel?.textColor = view.tintColor
+        case (0, _): cell.accessoryType = .disclosureIndicator
+        case (1, 0): cell.detailTextLabel?.text = musicSize
+        case (1, 1): cell.detailTextLabel?.text = cacheSize
+        case (2, 0): cell.textLabel?.textColor = Theme.red
+        case (2, _): cell.textLabel?.textColor = Theme.green
         default:
             cell.detailTextLabel?.text = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         }
@@ -76,7 +79,11 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard indexPath.section == 1 else { return }
+        if indexPath.section == 0 {
+            navigationController?.pushViewController(ExtensionsViewController(style: .grouped), animated: true)
+            return
+        }
+        guard indexPath.section == 2 else { return }
         switch indexPath.row {
         case 0:
             let sheet = UIAlertController(title: "Clear cache?", message: "Removes cached artwork, repository data and temporary files. Music and extensions are kept.",

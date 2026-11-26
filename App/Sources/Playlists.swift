@@ -67,14 +67,23 @@ final class PlaylistStore {
     }
 }
 
-private func before(_ a: String, _ b: String) -> Bool { a.localizedCaseInsensitiveCompare(b) == .orderedAscending }
+func before(_ a: String, _ b: String) -> Bool { a.localizedCaseInsensitiveCompare(b) == .orderedAscending }
 
-private func albumOrder(_ a: LibraryItem, _ b: LibraryItem) -> Bool {
+func albumOrder(_ a: LibraryItem, _ b: LibraryItem) -> Bool {
     if a.albumName.lowercased() != b.albumName.lowercased() { return before(a.albumName, b.albumName) }
     if (a.discNumber ?? 0) != (b.discNumber ?? 0) { return (a.discNumber ?? 0) < (b.discNumber ?? 0) }
     if (a.trackNumber ?? 0) != (b.trackNumber ?? 0) { return (a.trackNumber ?? 0) < (b.trackNumber ?? 0) }
     return before(a.title, b.title)
 }
+
+/// Groups songs into albums (same album and artist, ignoring case), each in disc/track order.
+func albumGroups(_ items: [LibraryItem]) -> [[LibraryItem]] {
+    Dictionary(grouping: items) { "\($0.albumName.lowercased())\u{1}\($0.artistName.lowercased())" }
+        .values.map { $0.sorted(by: albumOrder) }
+        .sorted { before($0[0].albumName, $1[0].albumName) }
+}
+
+func songCount(_ n: Int) -> String { "\(n) song\(n == 1 ? "" : "s")" }
 
 extension UIViewController {
     func askPlaylistName(_ title: String, _ current: String = "", done: @escaping (String) -> Void) {
@@ -89,7 +98,7 @@ extension UIViewController {
     }
 
     func addToPlaylist(_ items: [LibraryItem], from view: UIView?) {
-        let sheet = UIAlertController(title: "Add to playlist", message: items.count == 1 ? items[0].title : "\(items.count) songs",
+        let sheet = UIAlertController(title: "Add to playlist", message: items.count == 1 ? items[0].title : songCount(items.count),
                                       preferredStyle: .actionSheet)
         for p in PlaylistStore.shared.playlists {
             sheet.addAction(UIAlertAction(title: p.name, style: .default) { _ in PlaylistStore.shared.add(items, to: p.id) })
@@ -101,34 +110,89 @@ extension UIViewController {
         present(sheet, from: view)
     }
 
-    @objc func openNowPlaying() { navigationController?.pushViewController(PlayerViewController(), animated: true) }
+    /// The "…" menu of a song.
+    func songMenu(_ item: LibraryItem, from view: UIView?, playlist: String? = nil, index: Int = 0) {
+        let sheet = UIAlertController(title: item.title, message: "\(item.artistName) · \(item.albumName)", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Add to playlist", style: .default) { _ in self.addToPlaylist([item], from: view) })
+        if let id = playlist {
+            sheet.addAction(UIAlertAction(title: "Remove from this playlist", style: .destructive) { _ in
+                PlaylistStore.shared.remove(at: index, from: id)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Go to artist", style: .default) { _ in
+            self.navigationController?.pushViewController(SongListViewController.artist(item.artistName), animated: true)
+        })
+        sheet.addAction(UIAlertAction(title: "Go to album", style: .default) { _ in
+            self.navigationController?.pushViewController(SongListViewController.album(item), animated: true)
+        })
+        sheet.addAction(UIAlertAction(title: "Edit song info", style: .default) { _ in self.editInfo(item) })
+        sheet.addAction(UIAlertAction(title: "Delete from library", style: .destructive) { _ in
+            let confirm = UIAlertController(title: "Delete \"\(item.title)\"?", message: "The file is removed from this iPad.",
+                                            preferredStyle: .alert)
+            confirm.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            confirm.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
+                LibraryStore.shared.delete(item)
+                NotificationCenter.default.post(name: Lite.libraryChanged, object: nil)
+            })
+            self.present(confirm, animated: true)
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        present(sheet, from: view)
+    }
+
+    func editInfo(_ item: LibraryItem) {
+        let a = UIAlertController(title: "Edit song info", message: "Saved into the file's tags.", preferredStyle: .alert)
+        for (value, hint) in [(item.title, "Title"), (item.artist, "Artist"), (item.album, "Album")] {
+            a.addTextField { $0.text = value; $0.placeholder = hint; $0.autocapitalizationType = .words; $0.clearButtonMode = .whileEditing }
+        }
+        a.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        a.addAction(UIAlertAction(title: "Save", style: .default) { _ in
+            let v = (a.textFields ?? []).map { ($0.text ?? "").trimmingCharacters(in: .whitespaces) }
+            guard v.count == 3 else { return }
+            LibraryStore.shared.editTags(item, ["title": v[0], "artist": v[1], "album": v[2], "album_artist": v[1]]) { ok in
+                if !ok { self.alert("Couldn't save", "This file's tags can't be edited.") }
+            }
+        })
+        present(a, animated: true)
+    }
+
+    @objc func openNowPlaying() {
+        guard Player.shared.current != nil else { return }
+        (tabBarController ?? self).present(PlayerViewController(), animated: true)
+    }
 }
 
-/// Library root: Artists, Albums, Songs and Playlists.
+/// Your Library: Playlists, Artists, Albums and Songs.
 final class LibraryViewController: UITableViewController, UISearchResultsUpdating {
     private struct Row { let title: String; let detail: String; let items: [LibraryItem]; let playlistId: String? }
 
-    private let modes = UISegmentedControl(items: ["Artists", "Albums", "Songs", "Playlists"])
+    private let pills = PillBar(["Playlists", "Artists", "Albums", "Songs"],
+                                selected: min(3, UserDefaults.standard.integer(forKey: "libraryMode")))
     private let search = UISearchController(searchResultsController: nil)
     private var rows: [Row] = []
     private var songs: [LibraryItem] = []
-    private var mode: Int { modes.selectedSegmentIndex }
+    private var mode: Int { pills.selected }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Library"
-        modes.selectedSegmentIndex = 0
-        modes.addTarget(self, action: #selector(reload), for: .valueChanged)
-        navigationItem.titleView = modes
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Playing", style: .plain, target: self, action: #selector(openNowPlaying))
+        title = "Your Library"
+        pills.changed = { [weak self] index in
+            UserDefaults.standard.set(index, forKey: "libraryMode")
+            self?.reload()
+        }
+        tableView.tableHeaderView = pills
+        navigationItem.rightBarButtonItem = UIBarButtonItem(image: Icon.plus.image(22), style: .plain, target: self,
+                                                            action: #selector(newPlaylist))
         search.searchResultsUpdater = self
         search.obscuresBackgroundDuringPresentation = false
+        search.searchBar.placeholder = "Search in Your Library"
         navigationItem.searchController = search
         definesPresentationContext = true
-        tableView.rowHeight = 56
+        tableView.rowHeight = 64
+        tableView.separatorStyle = .none
         refreshControl = UIRefreshControl()
         refreshControl?.addTarget(self, action: #selector(rescan), for: .valueChanged)
-        for name in [Lite.libraryChanged, PlaylistStore.changed] {
+        for name in [Lite.libraryChanged, PlaylistStore.changed, Player.changed] {
             NotificationCenter.default.addObserver(self, selector: #selector(reload), name: name, object: nil)
         }
         reload()
@@ -141,11 +205,14 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
 
     func updateSearchResults(for searchController: UISearchController) { reload() }
 
-    @objc private func newPlaylist() { askPlaylistName("New playlist") { PlaylistStore.shared.create($0) } }
+    @objc private func newPlaylist() {
+        askPlaylistName("New playlist") { name in
+            let p = PlaylistStore.shared.create(name)
+            self.navigationController?.pushViewController(SongListViewController(playlist: p.id), animated: true)
+        }
+    }
 
     @objc private func reload() {
-        navigationItem.leftBarButtonItem = mode == 3
-            ? UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(newPlaylist)) : nil
         let q = (search.searchBar.text ?? "").lowercased()
         let all = LibraryStore.shared.items.filter {
             q.isEmpty || "\($0.title) \($0.artist) \($0.album)".lowercased().contains(q)
@@ -154,72 +221,76 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
         rows = []
         switch mode {
         case 0:
+            rows = PlaylistStore.shared.playlists
+                .filter { q.isEmpty || $0.name.lowercased().contains(q) }
+                .sorted { before($0.name, $1.name) }
+                .map { p in
+                    let items = PlaylistStore.shared.items(p.id)
+                    return Row(title: p.name, detail: "Playlist · \(songCount(items.count))", items: items, playlistId: p.id)
+                }
+        case 1:
             let groups = Dictionary(grouping: all) { $0.artistName }
             rows = groups.keys.sorted(by: before).map { name in
                 let items = groups[name]!.sorted(by: albumOrder)
-                let albums = Set(items.map { $0.albumName }).count
-                return Row(title: name, detail: "\(albums) album\(albums == 1 ? "" : "s") · \(count(items))", items: items, playlistId: nil)
+                return Row(title: name, detail: "Artist · \(songCount(items.count))", items: items, playlistId: nil)
             }
-        case 1:
-            let groups = Dictionary(grouping: all) { "\($0.albumName.lowercased())\u{1}\($0.artistName.lowercased())" }
-            rows = groups.values.map { $0.sorted(by: albumOrder) }
-                .sorted { before($0[0].albumName, $1[0].albumName) }
-                .map { Row(title: $0[0].albumName, detail: "\($0[0].artistName) · \(count($0))", items: $0, playlistId: nil) }
         case 2:
-            songs = all.sorted { before($0.title, $1.title) }
+            rows = albumGroups(all).map { Row(title: $0[0].albumName, detail: "Album · \($0[0].artistName)", items: $0, playlistId: nil) }
         default:
-            rows = PlaylistStore.shared.playlists
-                .filter { q.isEmpty || $0.name.lowercased().contains(q) }
-                .map { p in
-                    let items = PlaylistStore.shared.items(p.id)
-                    return Row(title: p.name, detail: count(items), items: items, playlistId: p.id)
-                }
+            songs = all.sorted { before($0.title, $1.title) }
         }
+        let empty = mode == 3 ? songs.isEmpty : rows.isEmpty
+        tableView.backgroundView = empty ? Theme.emptyLabel(mode == 0 && q.isEmpty
+            ? "Tap + to create your first playlist."
+            : q.isEmpty ? "Songs you download show up here." : "No matches") : nil
         tableView.reloadData()
     }
 
-    private func count(_ items: [LibraryItem]) -> String { "\(items.count) song\(items.count == 1 ? "" : "s")" }
-
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        mode == 2 ? songs.count : rows.count
+        mode == 3 ? (songs.isEmpty ? 0 : songs.count + 1) : rows.count
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "t") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "t")
-        cell.detailTextLabel?.textColor = .gray
-        if mode == 2 {
-            let item = songs[indexPath.row]
-            cell.textLabel?.text = item.title
-            cell.detailTextLabel?.text = "\(item.artistName) · \(item.albumName)"
-            cell.accessoryType = .none
-        } else {
-            cell.textLabel?.text = rows[indexPath.row].title
-            cell.detailTextLabel?.text = rows[indexPath.row].detail
-            cell.accessoryType = .disclosureIndicator
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        if mode == 3 {
+            if indexPath.row == 0 {
+                cell.art.accessibilityIdentifier = nil
+                cell.art.contentMode = .center
+                cell.art.image = Icon.shuffle.image(22, .black)
+                cell.art.backgroundColor = Theme.green
+                cell.set("Shuffle play", songCount(songs.count))
+                return cell
+            }
+            let item = songs[indexPath.row - 1]
+            cell.art.backgroundColor = Theme.elevated
+            Art.set(cell.art, path: item.coverPath, size: 50)
+            cell.set(item.title, "\(item.artistName) · \(item.albumName)", playing: Player.shared.current?.path == item.path)
+            cell.onMore = { [weak self] v in self?.songMenu(item, from: v) }
+            return cell
         }
+        let row = rows[indexPath.row]
+        cell.art.backgroundColor = Theme.elevated
+        cell.round = mode == 1
+        Art.set(cell.art, path: row.items.first { $0.coverPath != nil }?.coverPath, size: 50,
+                placeholder: mode == 0 ? .list : mode == 1 ? .person : .music)
+        cell.set(row.title, row.detail)
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if mode == 2 {
-            Player.shared.play(songs, at: indexPath.row)
-            return openNowPlaying()
+        if mode == 3 {
+            if indexPath.row == 0 { Player.shared.play(songs.shuffled(), at: 0) } else { Player.shared.play(songs, at: indexPath.row - 1) }
+            return
         }
         let row = rows[indexPath.row]
         let list: SongListViewController
         if let id = row.playlistId {
             list = SongListViewController(playlist: id)
+        } else if mode == 1 {
+            list = SongListViewController.artist(row.title)
         } else {
-            let artist = mode == 0
-            list = SongListViewController(title: row.title, grouped: artist) {
-                let items = LibraryStore.shared.items.filter {
-                    let same = { (x: String, y: String) in x.lowercased() == y.lowercased() }
-                    return artist ? $0.artistName == row.title
-                        : same($0.albumName, row.title) && same($0.artistName, row.items[0].artistName)
-                }
-                return items.sorted(by: albumOrder)
-            }
+            list = SongListViewController.album(row.items[0])
         }
         navigationController?.pushViewController(list, animated: true)
     }
@@ -227,7 +298,7 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
     override func tableView(_ tableView: UITableView,
                             trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         let cell = tableView.cellForRow(at: indexPath)
-        if mode == 3 {
+        if mode == 0 {
             let id = rows[indexPath.row].playlistId ?? ""
             let delete = UIContextualAction(style: .destructive, title: "Delete") { _, _, done in
                 PlaylistStore.shared.delete(id); done(true)
@@ -240,76 +311,139 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
             }
             return UISwipeActionsConfiguration(actions: [delete, rename])
         }
-        let items = mode == 2 ? [songs[indexPath.row]] : rows[indexPath.row].items
+        if mode == 3 && indexPath.row == 0 { return nil }
+        let items = mode == 3 ? [songs[indexPath.row - 1]] : rows[indexPath.row].items
         let add = UIContextualAction(style: .normal, title: "Add to Playlist") { _, _, done in
             self.addToPlaylist(items, from: cell); done(true)
         }
-        add.backgroundColor = view.tintColor
-        guard mode == 2 else { return UISwipeActionsConfiguration(actions: [add]) }
-        let delete = UIContextualAction(style: .destructive, title: "Delete") { _, _, done in
-            LibraryStore.shared.delete(items[0])
-            self.reload()
-            done(true)
-        }
-        return UISwipeActionsConfiguration(actions: [delete, add])
+        add.backgroundColor = Theme.green
+        return UISwipeActionsConfiguration(actions: [add])
     }
 }
 
-/// Songs of one artist, album or playlist.
+/// Songs of one album, artist or playlist, under a Spotify-style header.
 final class SongListViewController: UITableViewController {
+    enum Kind { case album, artist, playlist(String) }
+
+    private let kind: Kind
     private let load: () -> [LibraryItem]
-    private let grouped: Bool
-    private let playlistId: String?
+    private let name: String
     private var songs: [LibraryItem] = []
     private var sections: [(String, [LibraryItem])] = []
+    private var header: DetailHeader!
 
-    init(title: String, grouped: Bool, load: @escaping () -> [LibraryItem]) {
+    init(kind: Kind, title: String, load: @escaping () -> [LibraryItem]) {
+        self.kind = kind
         self.load = load
-        self.grouped = grouped
-        playlistId = nil
+        name = title
         super.init(style: .plain)
-        self.title = title
     }
 
-    init(playlist id: String) {
-        load = { PlaylistStore.shared.items(id) }
-        grouped = false
-        playlistId = id
-        super.init(style: .plain)
+    convenience init(playlist id: String) {
+        self.init(kind: .playlist(id), title: "") { PlaylistStore.shared.items(id) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    static func album(_ item: LibraryItem) -> SongListViewController {
+        let album = item.albumName.lowercased(), artist = item.artistName.lowercased()
+        return SongListViewController(kind: .album, title: item.albumName) {
+            LibraryStore.shared.items
+                .filter { $0.albumName.lowercased() == album && $0.artistName.lowercased() == artist }
+                .sorted(by: albumOrder)
+        }
+    }
+
+    static func artist(_ name: String) -> SongListViewController {
+        SongListViewController(kind: .artist, title: name) {
+            LibraryStore.shared.items.filter { $0.artistName == name }.sorted(by: albumOrder)
+        }
+    }
+
+    private var playlistId: String? {
+        if case let .playlist(id) = kind { return id }
+        return nil
+    }
+
+    private var isArtist: Bool {
+        if case .artist = kind { return true }
+        return false
+    }
+
+    private var isAlbum: Bool {
+        if case .album = kind { return true }
+        return false
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        tableView.rowHeight = 56
-        var buttons = [UIBarButtonItem(title: "Playing", style: .plain, target: self, action: #selector(openNowPlaying))]
+        navigationItem.largeTitleDisplayMode = .never
+        tableView.rowHeight = 60
+        tableView.separatorStyle = .none
+        header = DetailHeader(width: view.bounds.width, round: isArtist)
+        header.action.addTarget(self, action: #selector(playAll), for: .touchUpInside)
+        header.shuffle.addTarget(self, action: #selector(shuffleAll), for: .touchUpInside)
         if playlistId != nil {
-            buttons.append(editButtonItem)
-            buttons.append(UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addSongs)))
+            header.extra.isHidden = false
+            header.extra.addTarget(self, action: #selector(addSongs), for: .touchUpInside)
+            navigationItem.rightBarButtonItems = [
+                UIBarButtonItem(image: Icon.more.image(22), style: .plain, target: self, action: #selector(playlistMenu)),
+                editButtonItem,
+            ]
         }
-        navigationItem.rightBarButtonItems = buttons
-        for name in [Lite.libraryChanged, PlaylistStore.changed] {
-            NotificationCenter.default.addObserver(self, selector: #selector(reload), name: name, object: nil)
+        tableView.tableHeaderView = header
+        for n in [Lite.libraryChanged, PlaylistStore.changed, Player.changed] {
+            NotificationCenter.default.addObserver(self, selector: #selector(reload), name: n, object: nil)
         }
         reload()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if header.frame.width != tableView.bounds.width { resizeHeader() }
+    }
+
+    private func resizeHeader() {
+        header.frame.size = CGSize(width: tableView.bounds.width, height: header.layout(tableView.bounds.width))
+        tableView.tableHeaderView = header
+    }
+
     @objc private func reload() {
-        if let id = playlistId { title = PlaylistStore.shared.playlist(id)?.name ?? "Playlist" }
+        let title = playlistId.flatMap { PlaylistStore.shared.playlist($0)?.name } ?? name
+        self.title = title
         songs = load()
         sections = []
         for item in songs {
-            if grouped, let last = sections.last, last.0.lowercased() == item.albumName.lowercased() {
+            if isArtist, let last = sections.last, last.0.lowercased() == item.albumName.lowercased() {
                 sections[sections.count - 1].1.append(item)
-            } else if grouped || sections.isEmpty {
-                sections.append((item.albumName, [item]))
+            } else if isArtist || sections.isEmpty {
+                sections.append((isArtist ? item.albumName : "", [item]))
             } else {
                 sections[0].1.append(item)
             }
         }
+        header.titleLabel.text = title
+        switch kind {
+        case .album: header.subtitleLabel.text = "Album · \(songs.first?.artistName ?? "") · \(songCount(songs.count))"
+        case .artist: header.subtitleLabel.text = "\(sections.count) album\(sections.count == 1 ? "" : "s") · \(songCount(songs.count))"
+        case .playlist: header.subtitleLabel.text = "Playlist · \(songCount(songs.count))"
+        }
+        Art.set(header.art, path: songs.first { $0.coverPath != nil }?.coverPath, size: 220,
+                placeholder: isArtist ? .person : playlistId != nil ? .list : .music)
+        header.action.alpha = songs.isEmpty ? 0.4 : 1
+        resizeHeader()
+        if playlistId != nil && songs.isEmpty {
+            let empty = Theme.emptyLabel("This playlist is empty. Tap + to add songs.")
+            empty.frame = CGRect(x: 0, y: 0, width: tableView.bounds.width, height: 80)
+            tableView.tableFooterView = empty
+        } else {
+            tableView.tableFooterView = UIView()
+        }
         tableView.reloadData()
     }
+
+    @objc private func playAll() { if !songs.isEmpty { Player.shared.play(songs, at: 0) } }
+    @objc private func shuffleAll() { if !songs.isEmpty { Player.shared.play(songs.shuffled(), at: 0) } }
 
     @objc private func addSongs() {
         guard let id = playlistId else { return }
@@ -317,57 +451,73 @@ final class SongListViewController: UITableViewController {
         present(UINavigationController(rootViewController: picker), animated: true)
     }
 
-    override func numberOfSections(in tableView: UITableView) -> Int { sections.count + 1 }
-
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        grouped && section > 0 ? sections[section - 1].0 : nil
+    @objc private func playlistMenu() {
+        guard let id = playlistId else { return }
+        let sheet = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Add songs", style: .default) { _ in self.addSongs() })
+        sheet.addAction(UIAlertAction(title: "Rename", style: .default) { _ in
+            self.askPlaylistName("Rename playlist", self.title ?? "") { PlaylistStore.shared.rename(id, to: $0) }
+        })
+        sheet.addAction(UIAlertAction(title: "Delete playlist", style: .destructive) { _ in
+            PlaylistStore.shared.delete(id)
+            self.navigationController?.popViewController(animated: true)
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItems?.first
+        present(sheet, animated: true)
     }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        section == 0 ? (songs.isEmpty ? 0 : 2) : sections[section - 1].1.count
+    private func flatIndex(_ indexPath: IndexPath) -> Int {
+        sections[0..<indexPath.section].reduce(0) { $0 + $1.1.count } + indexPath.row
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { sections.count }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { sections[section].1.count }
+
+    override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat { isArtist ? 44 : 0 }
+
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        guard isArtist else { return nil }
+        let v = UIView()
+        v.backgroundColor = Theme.bg
+        let l = Theme.label(18, .bold)
+        l.text = sections[section].0
+        l.frame = CGRect(x: 16, y: 12, width: tableView.bounds.width - 32, height: 26)
+        v.addSubview(l)
+        return v
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "t") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "t")
-        cell.detailTextLabel?.textColor = .gray
-        if indexPath.section == 0 {
-            cell.textLabel?.text = indexPath.row == 0 ? "Play" : "Shuffle"
-            cell.textLabel?.textColor = view.tintColor
-            cell.detailTextLabel?.text = nil
-            return cell
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        let item = sections[indexPath.section].1[indexPath.row]
+        let playing = Player.shared.current?.path == item.path
+        cell.showsArt = !isAlbum
+        if isAlbum {
+            cell.set(item.title, item.artistName, playing: playing)
+        } else {
+            Art.set(cell.art, path: item.coverPath, size: 46)
+            cell.set(item.title, isArtist ? item.albumName : "\(item.artistName) · \(item.albumName)", playing: playing)
         }
-        let item = sections[indexPath.section - 1].1[indexPath.row]
-        cell.textLabel?.textColor = .black
-        let number = (item.trackNumber ?? 0) > 0 && grouped ? "\(item.trackNumber!). " : ""
-        cell.textLabel?.text = number + item.title
-        cell.detailTextLabel?.text = grouped ? item.artistName : "\(item.artistName) · \(item.albumName)"
+        let index = flatIndex(indexPath)
+        cell.onMore = { [weak self] v in self?.songMenu(item, from: v, playlist: self?.playlistId, index: index) }
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if indexPath.section == 0 {
-            Player.shared.play(indexPath.row == 0 ? songs : songs.shuffled(), at: 0)
-        } else {
-            let index = sections[0..<(indexPath.section - 1)].reduce(0) { $0 + $1.1.count } + indexPath.row
-            Player.shared.play(songs, at: index)
-        }
-        openNowPlaying()
+        Player.shared.play(songs, at: flatIndex(indexPath))
     }
 
-    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool { indexPath.section > 0 }
-    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        playlistId != nil && indexPath.section > 0
-    }
-
-    override func tableView(_ tableView: UITableView, targetIndexPathForMoveFromRowAt source: IndexPath,
-                            toProposedIndexPath proposed: IndexPath) -> IndexPath {
-        proposed.section == source.section ? proposed : source
-    }
+    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool { playlistId != nil }
 
     override func tableView(_ tableView: UITableView, moveRowAt source: IndexPath, to destination: IndexPath) {
         guard let id = playlistId else { return }
         PlaylistStore.shared.move(from: source.row, to: destination.row, in: id)
+    }
+
+    override func tableView(_ tableView: UITableView, editingStyleForRowAt indexPath: IndexPath) -> UITableViewCell.EditingStyle {
+        playlistId != nil ? .delete : .none
     }
 
     override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle, forRowAt indexPath: IndexPath) {
@@ -377,8 +527,7 @@ final class SongListViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView,
                             trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard indexPath.section > 0 else { return nil }
-        let item = sections[indexPath.section - 1].1[indexPath.row]
+        let item = sections[indexPath.section].1[indexPath.row]
         if let id = playlistId {
             let remove = UIContextualAction(style: .destructive, title: "Remove") { _, _, done in
                 PlaylistStore.shared.remove(at: indexPath.row, from: id); done(true)
@@ -389,13 +538,8 @@ final class SongListViewController: UITableViewController {
         let add = UIContextualAction(style: .normal, title: "Add to Playlist") { _, _, done in
             self.addToPlaylist([item], from: cell); done(true)
         }
-        add.backgroundColor = view.tintColor
-        let delete = UIContextualAction(style: .destructive, title: "Delete") { _, _, done in
-            LibraryStore.shared.delete(item)
-            NotificationCenter.default.post(name: Lite.libraryChanged, object: nil)
-            done(true)
-        }
-        return UISwipeActionsConfiguration(actions: [delete, add])
+        add.backgroundColor = Theme.green
+        return UISwipeActionsConfiguration(actions: [add])
     }
 }
 
@@ -417,9 +561,11 @@ final class SongPickerViewController: UITableViewController, UISearchResultsUpda
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Add songs"
-        tableView.rowHeight = 56
+        tableView.rowHeight = 60
+        tableView.separatorStyle = .none
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(add))
+        navigationItem.rightBarButtonItem?.tintColor = Theme.green
         search.searchResultsUpdater = self
         search.obscuresBackgroundDuringPresentation = false
         navigationItem.searchController = search
@@ -444,11 +590,10 @@ final class SongPickerViewController: UITableViewController, UISearchResultsUpda
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { shown.count }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "t") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "t")
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
         let item = shown[indexPath.row]
-        cell.textLabel?.text = item.title
-        cell.detailTextLabel?.text = "\(item.artistName) · \(item.albumName)"
-        cell.detailTextLabel?.textColor = .gray
+        Art.set(cell.art, path: item.coverPath, size: 46)
+        cell.set(item.title, "\(item.artistName) · \(item.albumName)")
         cell.accessoryType = picked.contains(item.path) ? .checkmark : .none
         return cell
     }

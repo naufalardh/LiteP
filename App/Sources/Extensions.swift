@@ -7,8 +7,9 @@ final class ExtensionsViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Extensions"
-        navigationItem.leftBarButtonItem = editButtonItem
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Refresh", style: .plain, target: self, action: #selector(refreshCatalog))
+        navigationItem.largeTitleDisplayMode = .never
+        navigationItem.rightBarButtonItems = [UIBarButtonItem(title: "Refresh", style: .plain, target: self, action: #selector(refreshCatalog)),
+                                              editButtonItem]
         NotificationCenter.default.addObserver(tableView!, selector: #selector(UITableView.reloadData), name: Lite.extensionsChanged, object: nil)
         refreshCatalog()
     }
@@ -97,7 +98,8 @@ final class ExtensionsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
-        cell.detailTextLabel?.textColor = .gray
+        Theme.style(cell)
+        cell.backgroundColor = UIColor(white: 0.11, alpha: 1)
         switch indexPath.section {
         case 0:
             let urls = Lite.shared.repoURLs

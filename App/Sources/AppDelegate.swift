@@ -5,23 +5,24 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        let tabs = UITabBarController()
-        let roots: [(UIViewController, String)] = [
-            (SearchViewController(style: .plain), "Search"),
-            (DownloadsViewController(style: .plain), "Downloads"),
-            (LibraryViewController(style: .plain), "Library"),
-            (ExtensionsViewController(style: .grouped), "Extensions"),
-            (SettingsViewController(style: .grouped), "Settings"),
+        window = UIWindow(frame: UIScreen.main.bounds)
+        Theme.apply(window)
+        let tabs = MainTabController()
+        let roots: [(UIViewController, String, Icon)] = [
+            (HomeViewController(), "Home", .home),
+            (SearchViewController(style: .plain), "Search", .search),
+            (LibraryViewController(style: .plain), "Your Library", .library),
+            (DownloadsViewController(style: .plain), "Downloads", .download),
+            (SettingsViewController(style: .grouped), "Settings", .settings),
         ]
-        tabs.viewControllers = roots.map { vc, title in
+        tabs.viewControllers = roots.enumerated().map { i, root in
+            let (vc, title, icon) = root
             let nav = UINavigationController(rootViewController: vc)
-            nav.tabBarItem = UITabBarItem(title: title, image: nil, tag: 0)
-            nav.tabBarItem.titlePositionAdjustment = UIOffset(horizontal: 0, vertical: -12)
+            nav.navigationBar.prefersLargeTitles = true
+            nav.tabBarItem = UITabBarItem(title: title, image: icon.image(24), tag: i)
+            nav.tabBarItem.badgeColor = Theme.green
             return nav
         }
-        tabs.tabBar.isTranslucent = false
-        window = UIWindow(frame: UIScreen.main.bounds)
-        window?.backgroundColor = .white
         window?.rootViewController = tabs
         window?.makeKeyAndVisible()
         _ = Player.shared

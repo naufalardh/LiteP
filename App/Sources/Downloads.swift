@@ -61,6 +61,43 @@ final class DownloadManager {
         }
     }
 
+    /// Removes jobs from the list (cancelling active ones), optionally deleting their saved songs.
+    func remove(_ list: [DownloadJob], deleteFiles: Bool) {
+        var deleted = false
+        for job in list {
+            if !job.done {
+                Lite.shared.call("cancelDownload", ["item_id": job.id])
+                job.status = "Cancelled"
+                job.done = true
+            } else if deleteFiles, !job.filePath.isEmpty, !job.status.hasPrefix("Failed"),
+                      FileManager.default.fileExists(atPath: job.filePath) {
+                try? FileManager.default.removeItem(atPath: job.filePath)
+                deleted = true
+            }
+        }
+        jobs.removeAll { job in list.contains { $0 === job } && !job.status.hasPrefix("Converting") }
+        notify()
+        if deleted { LibraryStore.shared.scan {} }
+    }
+
+    /// Tags to write into the saved file, preferring what the download returned over the search result.
+    static func tags(_ track: Track, _ result: [String: Any]) -> [String: String] {
+        func pick(_ key: String, _ fallback: String) -> String {
+            let value = result.str(key)
+            return value.isEmpty || value == "0" ? fallback : value
+        }
+        var tags = ["title": pick("title", track.title), "artist": pick("artist", track.artist),
+                    "album": pick("album", track.album), "album_artist": pick("album_artist", track.raw.str("album_artist")),
+                    "date": pick("release_date", track.raw.str("release_date")), "isrc": pick("isrc", track.raw.str("isrc")),
+                    "cover_url": pick("cover_url", track.coverURL)]
+        if tags["album_artist"]?.isEmpty != false { tags["album_artist"] = track.primaryArtist }
+        for key in ["track_number", "disc_number"] {
+            let n = result.int(key) > 0 ? result.int(key) : track.raw.int(key)
+            if n > 0 { tags[key] = String(n) }
+        }
+        return tags.filter { !$0.value.isEmpty }
+    }
+
     func clearFinished() {
         jobs.removeAll { $0.done && !$0.status.hasPrefix("Converting") }
         notify()
@@ -100,7 +137,7 @@ final class DownloadManager {
                         job.status = opus ? "Converting to AAC…" : finished
                         job.progress = 1
                         job.detail = Self.describe(result, path)
-                        LibraryStore.shared.importDownload(path) { saved in
+                        LibraryStore.shared.importDownload(path, tags: Self.tags(job.track, result)) { saved in
                             if let saved = saved {
                                 job.filePath = saved
                                 job.status = finished
@@ -201,36 +238,103 @@ final class DownloadManager {
 }
 
 final class DownloadsViewController: UITableViewController {
+    private let jobs = { DownloadManager.shared.jobs }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Downloads"
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(clear))
-        tableView.estimatedRowHeight = 72
-        tableView.rowHeight = UITableView.automaticDimension
-        NotificationCenter.default.addObserver(tableView!, selector: #selector(UITableView.reloadData), name: DownloadManager.changed, object: nil)
+        tableView.rowHeight = 88
+        tableView.separatorStyle = .none
+        tableView.allowsMultipleSelectionDuringEditing = true
+        tableView.register(DownloadCell.self, forCellReuseIdentifier: "d")
+        NotificationCenter.default.addObserver(self, selector: #selector(changed), name: DownloadManager.changed, object: nil)
+        updateButtons()
+        changed()
+    }
+
+    @objc private func changed() {
+        tableView.backgroundView = jobs().isEmpty ? Theme.emptyLabel("No downloads yet.\nFind songs in Search and tap one to download it.") : nil
+        if tableView.isEditing && tableView.numberOfRows(inSection: 0) == jobs().count {
+            for cell in tableView.visibleCells {
+                if let path = tableView.indexPath(for: cell), let cell = cell as? DownloadCell { cell.show(jobs()[path.row]) }
+            }
+        } else {
+            tableView.reloadData()
+        }
+        updateButtons()
+    }
+
+    override func setEditing(_ editing: Bool, animated: Bool) {
+        super.setEditing(editing, animated: animated)
+        updateButtons()
+    }
+
+    private var selectedJobs: [DownloadJob] {
+        (tableView.indexPathsForSelectedRows ?? []).map { $0.row }.filter { jobs().indices.contains($0) }.map { jobs()[$0] }
+    }
+
+    private func updateButtons() {
+        if isEditing {
+            let all = !jobs().isEmpty && selectedJobs.count == jobs().count
+            navigationItem.leftBarButtonItem = UIBarButtonItem(title: all ? "Deselect All" : "Select All", style: .plain,
+                                                               target: self, action: #selector(selectAll))
+            let delete = UIBarButtonItem(title: selectedJobs.isEmpty ? "Delete" : "Delete (\(selectedJobs.count))", style: .plain,
+                                         target: self, action: #selector(deleteSelected))
+            delete.tintColor = Theme.red
+            delete.isEnabled = !selectedJobs.isEmpty
+            navigationItem.rightBarButtonItems = [editButtonItem, delete]
+        } else {
+            navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Clear done", style: .plain, target: self, action: #selector(clear))
+            navigationItem.leftBarButtonItem?.isEnabled = jobs().contains { $0.done }
+            navigationItem.rightBarButtonItems = [editButtonItem]
+            editButtonItem.isEnabled = !jobs().isEmpty
+        }
     }
 
     @objc private func clear() { DownloadManager.shared.clearFinished() }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { DownloadManager.shared.jobs.count }
+    @objc private func selectAll() {
+        let all = selectedJobs.count == jobs().count
+        for row in jobs().indices {
+            let path = IndexPath(row: row, section: 0)
+            if all { tableView.deselectRow(at: path, animated: false) } else { tableView.selectRow(at: path, animated: false, scrollPosition: .none) }
+        }
+        updateButtons()
+    }
+
+    @objc private func deleteSelected() {
+        let list = selectedJobs
+        guard !list.isEmpty else { return }
+        let saved = list.filter { $0.done && !$0.filePath.isEmpty && !$0.status.hasPrefix("Failed") }.count
+        let sheet = UIAlertController(title: "Remove \(list.count) download\(list.count == 1 ? "" : "s")?", message: nil, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Remove from list", style: .default) { _ in self.remove(list, files: false) })
+        if saved > 0 {
+            sheet.addAction(UIAlertAction(title: "Remove and delete \(songCount(saved))", style: .destructive) { _ in self.remove(list, files: true) })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItems?.last
+        present(sheet, animated: true)
+    }
+
+    private func remove(_ list: [DownloadJob], files: Bool) {
+        DownloadManager.shared.remove(list, deleteFiles: files)
+        setEditing(false, animated: true)
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { jobs().count }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "d") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "d")
-        let job = DownloadManager.shared.jobs[indexPath.row]
-        let name = Lite.shared.extensions.first { $0.str("id") == job.provider }?.extName ?? job.provider
-        cell.textLabel?.text = "\(job.track.title) – \(job.track.artist)"
-        let percent = job.done ? "" : " \(Int(job.progress * 100))%"
-        var lines = ["\(name) · \(job.quality) · \(job.status)\(percent)"]
-        if !job.detail.isEmpty { lines.append(job.detail) }
-        cell.detailTextLabel?.text = lines.joined(separator: "\n")
-        cell.detailTextLabel?.textColor = job.status.hasPrefix("Failed") ? .red : .gray
-        cell.detailTextLabel?.numberOfLines = 0
+        let cell = tableView.dequeueReusableCell(withIdentifier: "d", for: indexPath) as! DownloadCell
+        cell.show(jobs()[indexPath.row])
         return cell
     }
 
+    override func tableView(_ tableView: UITableView, didDeselectRowAt indexPath: IndexPath) { updateButtons() }
+
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        if tableView.isEditing { return updateButtons() }
         tableView.deselectRow(at: indexPath, animated: true)
-        let job = DownloadManager.shared.jobs[indexPath.row]
+        let job = jobs()[indexPath.row]
         let sheet = UIAlertController(title: job.track.title, message: [job.status, job.detail].filter { !$0.isEmpty }.joined(separator: "\n"),
                                       preferredStyle: .actionSheet)
         if job.done && job.status.hasPrefix("Failed") {
@@ -239,7 +343,10 @@ final class DownloadsViewController: UITableViewController {
             }
             sheet.addAction(UIAlertAction(title: "Retry", style: .default) { _ in DownloadManager.shared.retry(job) })
         }
-        sheet.addAction(UIAlertAction(title: job.done ? "Remove" : "Cancel download", style: .destructive) { _ in
+        if let item = LibraryStore.shared.items.first(where: { $0.path == job.filePath }) {
+            sheet.addAction(UIAlertAction(title: "Play", style: .default) { _ in Player.shared.play([item], at: 0) })
+        }
+        sheet.addAction(UIAlertAction(title: job.done ? "Remove from list" : "Cancel download", style: .destructive) { _ in
             DownloadManager.shared.cancel(job)
         })
         sheet.addAction(UIAlertAction(title: "Close", style: .cancel))
@@ -247,10 +354,55 @@ final class DownloadsViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, titleForDeleteConfirmationButtonForRowAt indexPath: IndexPath) -> String? {
-        DownloadManager.shared.jobs[indexPath.row].done ? "Remove" : "Cancel"
+        jobs()[indexPath.row].done ? "Remove" : "Cancel"
     }
 
     override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle, forRowAt indexPath: IndexPath) {
-        DownloadManager.shared.cancel(DownloadManager.shared.jobs[indexPath.row])
+        DownloadManager.shared.cancel(jobs()[indexPath.row])
+    }
+}
+
+private final class DownloadCell: UITableViewCell {
+    private let art = UIImageView()
+    private let title = Theme.label(15, .semibold)
+    private let status = Theme.label(13, .medium)
+    private let detail = Theme.label(11, .regular, Theme.subtext)
+    private let bar = UIProgressView(progressViewStyle: .default)
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: .default, reuseIdentifier: reuseIdentifier)
+        Theme.style(self)
+        art.clipsToBounds = true
+        art.layer.cornerRadius = 3
+        art.backgroundColor = Theme.elevated
+        detail.numberOfLines = 2
+        [art, title, status, detail, bar].forEach { contentView.addSubview($0) }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ job: DownloadJob) {
+        let name = Lite.shared.extensions.first { $0.str("id") == job.provider }?.extName ?? job.provider
+        title.text = "\(job.track.title) · \(job.track.artist)"
+        let failed = job.status.hasPrefix("Failed") || job.status == "Cancelled"
+        let finished = job.done && !failed && !job.status.hasPrefix("Converting")
+        status.text = "\(name) · \(job.quality) · \(job.status)" + (job.done ? "" : " \(Int(job.progress * 100))%")
+        status.textColor = failed ? Theme.red : finished ? Theme.green : Theme.text
+        detail.text = job.detail
+        bar.isHidden = job.done
+        bar.progress = Float(job.progress)
+        Art.set(art, path: nil, url: job.track.coverURL, size: 56)
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = contentView.bounds.width
+        art.frame = CGRect(x: 16, y: 14, width: 56, height: 56)
+        let x = art.frame.maxX + 12
+        title.frame = CGRect(x: x, y: 10, width: w - x - 12, height: 20)
+        status.frame = CGRect(x: x, y: 31, width: w - x - 12, height: 18)
+        detail.frame = CGRect(x: x, y: 49, width: w - x - 12, height: 28)
+        bar.frame = CGRect(x: x, y: 80, width: w - x - 16, height: 2)
     }
 }

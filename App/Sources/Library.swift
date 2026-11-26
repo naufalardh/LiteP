@@ -40,15 +40,22 @@ final class LibraryStore {
     private let scanQueue = DispatchQueue(label: "mornye.library.scan", qos: .userInitiated)
 
     /// Converts a finished download to a playable format right away, then refreshes the library.
-    func importDownload(_ path: String, done: @escaping (String?) -> Void) {
+    /// `tags` come from the search result; Rust only embeds tags into FLAC, so other formats are tagged here.
+    func importDownload(_ path: String, tags: [String: String], done: @escaping (String?) -> Void) {
         scanQueue.async {
             var url = URL(fileURLWithPath: path)
-            if OpusRemux.extensions.contains(url.pathExtension.lowercased()) || OpusRemux.isOpusCAF(url) {
-                guard let converted = self.convertOpus(url) else {
+            let opus = OpusRemux.extensions.contains(url.pathExtension.lowercased()) || OpusRemux.isOpusCAF(url)
+            let target = opus ? url.deletingPathExtension().appendingPathExtension("m4a") : url
+            var tags = tags
+            if let cover = self.fetchCover(tags.removeValue(forKey: "cover_url"), for: target) { tags["cover_path"] = cover }
+            if opus {
+                guard let converted = self.convertOpus(url, tags: tags) else {
                     DispatchQueue.main.async { done(nil) }
                     return
                 }
                 url = converted
+            } else if url.pathExtension.lowercased() != "flac" {
+                self.writeTags(url, tags)
             }
             DispatchQueue.main.async {
                 done(url.path)
@@ -91,7 +98,40 @@ final class LibraryStore {
     }
 
     /// Converts Opus (.opus/.webm, or an older Opus .caf) to AAC .m4a, which iOS 12 plays, keeping its tags and cover.
-    private func convertOpus(_ url: URL) -> URL? {
+    private func fetchCover(_ link: String?, for audio: URL) -> String? {
+        let cover = coverDir.appendingPathComponent(sha256Hex(audio.path) + ".jpg")
+        guard let link = link, let remote = URL(string: link), remote.scheme?.hasPrefix("http") == true,
+              let data = try? Data(contentsOf: remote), UIImage(data: data) != nil else { return nil }
+        try? FileManager.default.createDirectory(at: coverDir, withIntermediateDirectories: true)
+        return (try? data.write(to: cover, options: .atomic)) != nil ? cover.path : nil
+    }
+
+    @discardableResult
+    private func writeTags(_ url: URL, _ tags: [String: String]) -> Bool {
+        let fields = tags.filter { !$0.value.isEmpty }
+        guard !fields.isEmpty, let data = try? JSONSerialization.data(withJSONObject: fields),
+              let json = String(data: data, encoding: .utf8) else { return false }
+        do {
+            _ = try Lite.shared.backend.editFileMetadata(path: url.path, metadataJson: json)
+            return true
+        } catch {
+            NSLog("MornyeLite: could not tag %@: %@", url.lastPathComponent, "\(error)")
+            return false
+        }
+    }
+
+    /// Rewrites a song's tags (Edit song info), then rescans.
+    func editTags(_ item: LibraryItem, _ tags: [String: String], done: @escaping (Bool) -> Void) {
+        scanQueue.async {
+            let ok = self.writeTags(item.url, tags)
+            DispatchQueue.main.async {
+                done(ok)
+                self.scan {}
+            }
+        }
+    }
+
+    private func convertOpus(_ url: URL, tags: [String: String] = [:]) -> URL? {
         let fm = FileManager.default
         let target = url.deletingPathExtension().appendingPathExtension("m4a")
         if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: url); return target }
@@ -112,13 +152,16 @@ final class LibraryStore {
                 if let value = names.map({ meta.int($0) }).first(where: { $0 > 0 }) { fields[key] = String(value) }
             }
         }
+        fields.merge(tags.filter { !$0.value.isEmpty }) { _, new in new }
         let parts = url.deletingPathExtension().lastPathComponent.components(separatedBy: " - ")
         if fields["title"] == nil, parts.count == 2 {
             fields["title"] = parts[0]
             if fields["artist"] == nil { fields["artist"] = parts[1] }
         }
         let cover = coverDir.appendingPathComponent(sha256Hex(target.path) + ".jpg")
-        _ = try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)
+        if !fm.fileExists(atPath: cover.path) {
+            _ = try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)
+        }
         let art = url.deletingPathExtension().appendingPathExtension("jpg")
         if fm.fileExists(atPath: cover.path), !fm.fileExists(atPath: art.path) { try? fm.copyItem(at: cover, to: art) }
         guard let converted = OpusRemux.toM4A(url) else {
