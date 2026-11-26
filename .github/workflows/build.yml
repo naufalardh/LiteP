@@ -1,0 +1,70 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+
+      - name: Install tools
+        run: |
+          brew install xcodegen
+          cd vendor/Mornye/rust_backend && rustup show
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            vendor/Mornye/rust_backend/target
+          key: cargo-ios12-${{ hashFiles('vendor/Mornye/rust_backend/Cargo.lock', 'vendor/Mornye/rust_backend/rust-toolchain.toml', 'scripts/build_backend.sh') }}
+          restore-keys: cargo-ios12-
+
+      - name: Build Rust backend (iOS 12, arm64)
+        run: bash scripts/build_backend.sh
+
+      - name: Build app
+        run: |
+          xcodegen generate
+          xcodebuild -project MornyeLite.xcodeproj -scheme MornyeLite -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO build | tail -200
+          test "${PIPESTATUS[0]}" = 0
+
+      - name: Package unsigned IPA
+        run: |
+          app=build/dd/Build/Products/Release-iphoneos/MornyeLite.app
+          otool -l "$app/MornyeLite" | grep -A4 LC_VERSION_MIN_IPHONEOS || otool -l "$app/MornyeLite" | grep -A5 LC_BUILD_VERSION
+          mkdir -p build/ipa/Payload
+          cp -R "$app" build/ipa/Payload/
+          (cd build/ipa && zip -qry ../MornyeLite-unsigned.ipa Payload)
+          ls -la build/MornyeLite-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MornyeLite-unsigned-ipa
+          path: build/MornyeLite-unsigned.ipa
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" build/MornyeLite-unsigned.ipa --title "$GITHUB_REF_NAME" --notes "Unsigned IPA for iOS 12+. Sideload with Sideloadly."
