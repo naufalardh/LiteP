@@ -87,10 +87,10 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
             self.tableView.reloadData()
         }
         if sourceId.isEmpty {
-            Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 50, "include_extensions": true], done: done)
+            Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 100, "include_extensions": true], done: done)
         } else if let ext = Lite.shared.searchExtensions.first(where: { $0.str("id") == sourceId }),
                   (ext["search_behavior"] as? [String: Any])?["enabled"] as? Bool != true {
-            Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 50], done: done)
+            Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 100], done: done)
         } else {
             Lite.shared.call("customSearchWithExtension", ["extension_id": sourceId, "query": query, "options": "{}",
                                                            "request_id": UUID().uuidString], done: done)
@@ -147,12 +147,31 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
             opened = groups[indexPath.row]
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Back", style: .plain, target: self, action: #selector(close))
             tableView.reloadData()
+            if modes.selectedSegmentIndex == 2, let group = opened { loadFullAlbum(group) }
             return
         }
         if opened != nil && indexPath.row == 0 { return pickProvider(tracks, cell) }
         let index = indexPath.row - (opened != nil ? 1 : 0)
         guard tracks.indices.contains(index) else { return }
         pickProvider([tracks[index]], cell)
+    }
+
+    /// Search only returns matching songs, so fetch the album itself to list every track.
+    private func loadFullAlbum(_ group: Group) {
+        guard let first = group.tracks.first, !first.albumId.isEmpty, !first.source.isEmpty else { return }
+        Lite.shared.call("getProviderMetadata", ["provider_id": first.source, "resource_type": "album",
+                                                 "resource_id": first.albumId]) { [weak self] value, error in
+            guard let self = self, self.opened?.name == group.name else { return }
+            let list = jsonList(jsonMap(value)["track_list"]).map { raw -> Track in
+                var raw = raw
+                if raw.str("source").isEmpty && raw.str("provider_id").isEmpty { raw["provider_id"] = first.source }
+                return Track(raw: raw)
+            }
+            guard error == nil, list.count > group.tracks.count else { return }
+            let count = "\(list.count) song\(list.count == 1 ? "" : "s")"
+            self.opened = Group(name: group.name, detail: "\(first.primaryArtist) · \(count)", tracks: list)
+            self.tableView.reloadData()
+        }
     }
 
     private func pickProvider(_ tracks: [Track], _ cell: UITableViewCell?) {

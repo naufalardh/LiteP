@@ -35,7 +35,7 @@ final class LibraryStore {
             let root = Lite.shared.music
             let files = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey])
             while var url = files?.nextObject() as? URL {
-                if OpusRemux.extensions.contains(url.pathExtension.lowercased()) {
+                if OpusRemux.extensions.contains(url.pathExtension.lowercased()) || OpusRemux.isOpusCAF(url) {
                     guard let converted = self.convertOpus(url) else { continue }
                     url = converted
                 }
@@ -58,29 +58,41 @@ final class LibraryStore {
         }
     }
 
-    /// Converts an .opus download to .caf (iOS 12 cannot play Ogg), keeping its tags and cover.
+    /// Converts Opus (.opus/.webm, or an older Opus .caf) to AAC .m4a, which iOS 12 plays, keeping its tags and cover.
     private func convertOpus(_ url: URL) -> URL? {
         let fm = FileManager.default
-        let target = url.deletingPathExtension().appendingPathExtension("caf")
+        let target = url.deletingPathExtension().appendingPathExtension("m4a")
         if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: url); return target }
-        let meta = jsonMap(try? Lite.shared.backend.readFileMetadata(path: url.path, hint: url.lastPathComponent))
-        var tags: [String: String] = [:]
-        for (key, names) in [(kAFInfoDictionary_Title, ["title", "track_name"]), (kAFInfoDictionary_Artist, ["artist", "artist_name"]),
-                             (kAFInfoDictionary_Album, ["album", "album_name"])] {
-            if let value = names.map({ meta.str($0) }).first(where: { !$0.isEmpty }) { tags[key] = value }
+        var fields: [String: String] = [:]
+        if url.pathExtension.lowercased() == "caf" {
+            let tags = OpusRemux.tags(url)
+            fields["title"] = tags[kAFInfoDictionary_Title]
+            fields["artist"] = tags[kAFInfoDictionary_Artist]
+            fields["album"] = tags[kAFInfoDictionary_Album]
+        } else {
+            let meta = jsonMap(try? Lite.shared.backend.readFileMetadata(path: url.path, hint: url.lastPathComponent))
+            for (key, names) in [("title", ["title", "track_name"]), ("artist", ["artist", "artist_name"]),
+                                 ("album", ["album", "album_name"]), ("album_artist", ["album_artist"])] {
+                if let value = names.map({ meta.str($0) }).first(where: { !$0.isEmpty }) { fields[key] = value }
+            }
         }
         let parts = url.deletingPathExtension().lastPathComponent.components(separatedBy: " - ")
-        if tags[kAFInfoDictionary_Title] == nil, parts.count == 2 {
-            tags[kAFInfoDictionary_Title] = parts[0]
-            if tags[kAFInfoDictionary_Artist] == nil { tags[kAFInfoDictionary_Artist] = parts[1] }
+        if fields["title"] == nil, parts.count == 2 {
+            fields["title"] = parts[0]
+            if fields["artist"] == nil { fields["artist"] = parts[1] }
         }
         let cover = coverDir.appendingPathComponent(sha256Hex(target.path) + ".jpg")
         _ = try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)
         let art = url.deletingPathExtension().appendingPathExtension("jpg")
         if fm.fileExists(atPath: cover.path), !fm.fileExists(atPath: art.path) { try? fm.copyItem(at: cover, to: art) }
-        guard let converted = OpusRemux.toCAF(url, tags: tags) else {
+        guard let converted = OpusRemux.toM4A(url) else {
             NSLog("MornyeLite: could not convert %@", url.lastPathComponent)
             return nil
+        }
+        if fm.fileExists(atPath: cover.path) { fields["cover_path"] = cover.path }
+        if !fields.isEmpty, let data = try? JSONSerialization.data(withJSONObject: fields), let json = String(data: data, encoding: .utf8) {
+            do { _ = try Lite.shared.backend.editFileMetadata(path: converted.path, metadataJson: json) }
+            catch { NSLog("MornyeLite: could not tag %@: %@", converted.lastPathComponent, "\(error)") }
         }
         try? fm.removeItem(at: url)
         return converted

@@ -7,6 +7,7 @@ final class Player: NSObject {
     static let changed = Notification.Name("LitePlayerChanged")
 
     private let player = AVPlayer()
+    private var statusObserver: NSKeyValueObservation?
     private(set) var queue: [LibraryItem] = []
     private(set) var index = 0
     var current: LibraryItem? { queue.indices.contains(index) ? queue[index] : nil }
@@ -40,7 +41,12 @@ final class Player: NSObject {
     private func load() {
         guard let item = current else { return }
         try? AVAudioSession.sharedInstance().setActive(true)
-        player.replaceCurrentItem(with: AVPlayerItem(url: item.url))
+        let playerItem = AVPlayerItem(url: item.url)
+        statusObserver = playerItem.observe(\.status) { observed, _ in
+            guard observed.status == .failed else { return }
+            NSLog("MornyeLite: cannot play %@: %@", item.url.lastPathComponent, "\(observed.error.map { "\($0)" } ?? "unknown")")
+        }
+        player.replaceCurrentItem(with: playerItem)
         player.play()
         update()
     }

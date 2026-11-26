@@ -41,6 +41,10 @@ struct Track {
         if let images = raw["images"] as? [[String: Any]] { return images.first?.str("url") ?? "" }
         return raw.str("images")
     }
+    var albumId: String {
+        if let map = raw["album"] as? [String: Any], !map.str("id").isEmpty { return map.str("id") }
+        return raw.str("album_id")
+    }
     var source: String { raw.str("source").isEmpty ? raw.str("provider_id") : raw.str("source") }
 
     func providerTrackId(for provider: String) -> String {

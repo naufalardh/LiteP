@@ -11,7 +11,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGN_IDENTITY: ""
-    SWIFT_INCLUDE_PATHS: $(SRCROOT)/build/backend/include
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/build/backend/include $(SRCROOT)/build/opus/include
     DEAD_CODE_STRIPPING: YES
 targets:
   MornyeBackend:
@@ -38,6 +38,7 @@ targets:
       - sdk: CoreFoundation.framework
       - sdk: AVFoundation.framework
       - sdk: MediaPlayer.framework
+      - sdk: AudioToolbox.framework
     settings:
       base:
         PRODUCT_NAME: MornyeLite
@@ -46,5 +47,5 @@ targets:
         MARKETING_VERSION: "5.4.5" # matches vendored Mornye; extensions gate on it
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
-        LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend
-        OTHER_LDFLAGS: -lmornye_mobile -lc++ -lresolv -lz
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend $(SRCROOT)/build/opus
+        OTHER_LDFLAGS: -lmornye_mobile -lopus -lc++ -lresolv -lz

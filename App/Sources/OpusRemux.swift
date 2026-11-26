@@ -1,58 +1,144 @@
 import AudioToolbox
+import COpus
 import Foundation
 
-/// Repackages Ogg or WebM Opus into CAF, which iOS 11+ plays natively. Packets are copied as-is (no re-encoding).
+/// Decodes Ogg, WebM or CAF Opus with libopus and re-encodes it as AAC (.m4a), which iOS 12 can play.
 enum OpusRemux {
     static let extensions: Set<String> = ["opus", "ogg", "oga", "webm"]
 
-    private struct Stream { var head: [UInt8]; var packets: [[UInt8]]; var endGranule: Int64 }
+    private struct Stream {
+        var head: [UInt8]
+        var packets: [[UInt8]]
+        var endGranule: Int64
+    }
 
-    static func toCAF(_ source: URL, tags: [String: String]) -> URL? {
-        guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else { return nil }
-        let bytes = [UInt8](data)
-        guard let stream = ogg(bytes) ?? webm(bytes) else {
-            NSLog("MornyeLite: unsupported Opus container %@ (%@)", source.lastPathComponent,
-                  bytes.prefix(8).map { String(format: "%02x", $0) }.joined())
+    static func toM4A(_ source: URL) -> URL? {
+        guard let stream = load(source) else { return nil }
+        let head = stream.head
+        guard head.count >= 19, head.starts(with: Array("OpusHead".utf8)), head[18] == 0 else { return nil }
+        let channels = Int(head[9])
+        guard channels == 1 || channels == 2 else { return nil }
+        var preSkip = Int(head[10]) | Int(head[11]) << 8
+        var remaining = stream.endGranule > 0 ? stream.endGranule - Int64(preSkip) : Int64.max
+        var error: Int32 = 0
+        guard let decoder = opus_decoder_create(48000, Int32(channels), &error), error == OPUS_OK else { return nil }
+        defer { opus_decoder_destroy(decoder) }
+
+        let target = source.deletingPathExtension().appendingPathExtension("m4a")
+        var aac = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatMPEG4AAC, mFormatFlags: 0,
+                                              mBytesPerPacket: 0, mFramesPerPacket: 1024, mBytesPerFrame: 0,
+                                              mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 0, mReserved: 0)
+        var pcm = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatLinearPCM,
+                                              mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                                              mBytesPerPacket: UInt32(4 * channels), mFramesPerPacket: 1,
+                                              mBytesPerFrame: UInt32(4 * channels), mChannelsPerFrame: UInt32(channels),
+                                              mBitsPerChannel: 32, mReserved: 0)
+        var fileRef: ExtAudioFileRef?
+        var status = ExtAudioFileCreateWithURL(target as CFURL, kAudioFileM4AType, &aac, nil,
+                                               AudioFileFlags.eraseFile.rawValue, &fileRef)
+        guard status == noErr, let file = fileRef else {
+            NSLog("MornyeLite: could not create %@ (%d)", target.lastPathComponent, status)
             return nil
         }
-        let head = stream.head
-        guard head.count >= 19, head.starts(with: Array("OpusHead".utf8)) else { return nil }
-        let channels = UInt32(head[9])
-        let preSkip = UInt32(head[10]) | UInt32(head[11]) << 8
-        guard channels == 1 || channels == 2, head[18] == 0 else { return nil }
-        let granule = stream.endGranule
-        let audio = stream.packets.filter { !$0.isEmpty }
-        guard !audio.isEmpty else { return nil }
+        var codec = kAppleSoftwareAudioCodecManufacturer
+        _ = ExtAudioFileSetProperty(file, kExtAudioFileProperty_CodecManufacturer, UInt32(MemoryLayout<UInt32>.size), &codec)
+        status = ExtAudioFileSetProperty(file, kExtAudioFileProperty_ClientDataFormat,
+                                         UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &pcm)
+        if status == noErr { setBitRate(file, channels == 2 ? 256_000 : 128_000) }
 
-        var format = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatOpus, mFormatFlags: 0,
-                                                 mBytesPerPacket: 0, mFramesPerPacket: 0, mBytesPerFrame: 0,
-                                                 mChannelsPerFrame: channels, mBitsPerChannel: 0, mReserved: 0)
-        let target = source.deletingPathExtension().appendingPathExtension("caf")
-        var file: AudioFileID?
-        guard AudioFileCreateWithURL(target as CFURL, kAudioFileCAFType, &format, .eraseFile, &file) == noErr, let out = file else { return nil }
-        var ok = true
-        var payload: [UInt8] = []
-        var descriptions: [AudioStreamPacketDescription] = []
-        var totalFrames: Int64 = 0
-        for packet in audio {
-            let frames = frameCount(packet)
-            descriptions.append(AudioStreamPacketDescription(mStartOffset: Int64(payload.count), mVariableFramesInPacket: frames,
-                                                             mDataByteSize: UInt32(packet.count)))
-            payload.append(contentsOf: packet)
-            totalFrames += Int64(frames)
+        var samples = [Float](repeating: 0, count: 5760 * channels)
+        for packet in stream.packets where status == noErr && remaining > 0 && !packet.isEmpty {
+            let decoded = Int(packet.withUnsafeBufferPointer { bytes in
+                opus_decode_float(decoder, bytes.baseAddress, Int32(packet.count), &samples, 5760, 0)
+            })
+            guard decoded >= 0 else { continue }
+            let skip = min(decoded, preSkip)
+            preSkip -= skip
+            let frames = Int(min(Int64(decoded - skip), remaining))
+            guard frames > 0 else { continue }
+            remaining -= Int64(frames)
+            status = samples.withUnsafeMutableBufferPointer { buffer -> OSStatus in
+                var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(
+                    mNumberChannels: UInt32(channels), mDataByteSize: UInt32(frames * channels * 4),
+                    mData: UnsafeMutableRawPointer(buffer.baseAddress! + skip * channels)))
+                return ExtAudioFileWrite(file, UInt32(frames), &list)
+            }
         }
-        var count = UInt32(descriptions.count)
-        ok = AudioFileWritePackets(out, false, UInt32(payload.count), descriptions, 0, &count, payload) == noErr
-        ok = ok && count == UInt32(descriptions.count)
-        let valid = max(0, (granule > 0 ? min(totalFrames, granule) : totalFrames) - Int64(preSkip))
-        var table = AudioFilePacketTableInfo(mNumberValidFrames: valid, mPrimingFrames: Int32(preSkip),
-                                             mRemainderFrames: Int32(min(Int64(Int32.max), max(0, totalFrames - Int64(preSkip) - valid))))
-        AudioFileSetProperty(out, kAudioFilePropertyPacketTableInfo, UInt32(MemoryLayout<AudioFilePacketTableInfo>.size), &table)
-        var info = tags as CFDictionary
-        AudioFileSetProperty(out, kAudioFilePropertyInfoDictionary, UInt32(MemoryLayout<CFDictionary>.size), &info)
-        ok = AudioFileClose(out) == noErr && ok
-        if !ok { try? FileManager.default.removeItem(at: target); return nil }
+        let closed = ExtAudioFileDispose(file)
+        guard status == noErr, closed == noErr else {
+            NSLog("MornyeLite: AAC encode failed for %@ (%d/%d)", source.lastPathComponent, status, closed)
+            try? FileManager.default.removeItem(at: target)
+            return nil
+        }
         return target
+    }
+
+    /// True for .caf files holding Opus, which iOS 12's player cannot decode.
+    static func isOpusCAF(_ url: URL) -> Bool {
+        guard url.pathExtension.lowercased() == "caf" else { return false }
+        var fileID: AudioFileID?
+        guard AudioFileOpenURL(url as CFURL, .readPermission, kAudioFileCAFType, &fileID) == noErr, let file = fileID else { return false }
+        defer { AudioFileClose(file) }
+        var format = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        return AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr && format.mFormatID == kAudioFormatOpus
+    }
+
+    private static func setBitRate(_ file: ExtAudioFileRef, _ rate: UInt32) {
+        var converter: AudioConverterRef?
+        var size = UInt32(MemoryLayout<AudioConverterRef?>.size)
+        guard ExtAudioFileGetProperty(file, kExtAudioFileProperty_AudioConverter, &size, &converter) == noErr,
+              let audioConverter = converter else { return }
+        var bitRate = rate
+        guard AudioConverterSetProperty(audioConverter, kAudioConverterEncodeBitRate,
+                                        UInt32(MemoryLayout<UInt32>.size), &bitRate) == noErr else { return }
+        var config: CFArray?
+        _ = ExtAudioFileSetProperty(file, kExtAudioFileProperty_ConverterConfig, UInt32(MemoryLayout<CFArray?>.size), &config)
+    }
+
+    private static func load(_ source: URL) -> Stream? {
+        if source.pathExtension.lowercased() == "caf" { return caf(source) }
+        guard let data = try? Data(contentsOf: source, options: .mappedIfSafe) else { return nil }
+        let bytes = [UInt8](data)
+        if let stream = ogg(bytes) ?? webm(bytes) { return stream }
+        NSLog("MornyeLite: unsupported Opus container %@ (%@)", source.lastPathComponent,
+              bytes.prefix(8).map { String(format: "%02x", $0) }.joined())
+        return nil
+    }
+
+    private static func caf(_ url: URL) -> Stream? {
+        var fileID: AudioFileID?
+        guard AudioFileOpenURL(url as CFURL, .readPermission, kAudioFileCAFType, &fileID) == noErr, let file = fileID else { return nil }
+        defer { AudioFileClose(file) }
+        var format = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        guard AudioFileGetProperty(file, kAudioFilePropertyDataFormat, &size, &format) == noErr,
+              format.mFormatID == kAudioFormatOpus else { return nil }
+        var count: UInt64 = 0
+        size = UInt32(MemoryLayout<UInt64>.size)
+        guard AudioFileGetProperty(file, kAudioFilePropertyAudioDataPacketCount, &size, &count) == noErr, count > 0 else { return nil }
+        var table = AudioFilePacketTableInfo()
+        size = UInt32(MemoryLayout<AudioFilePacketTableInfo>.size)
+        _ = AudioFileGetProperty(file, kAudioFilePropertyPacketTableInfo, &size, &table)
+        var maxSize: UInt32 = 0
+        size = UInt32(MemoryLayout<UInt32>.size)
+        _ = AudioFileGetProperty(file, kAudioFilePropertyMaximumPacketSize, &size, &maxSize)
+        if maxSize == 0 { maxSize = 4096 }
+        var buffer = [UInt8](repeating: 0, count: Int(maxSize))
+        var description = AudioStreamPacketDescription()
+        var packets: [[UInt8]] = []
+        for index in 0..<Int64(count) {
+            var bytes = maxSize
+            var packetsRead: UInt32 = 1
+            guard AudioFileReadPacketData(file, false, &bytes, &description, index, &packetsRead, &buffer) == noErr,
+                  packetsRead == 1 else { return nil }
+            packets.append(Array(buffer[0..<Int(bytes)]))
+        }
+        let preSkip = UInt16(clamping: max(0, table.mPrimingFrames))
+        let head = Array("OpusHead".utf8) + [1, UInt8(format.mChannelsPerFrame), UInt8(preSkip & 0xFF), UInt8(preSkip >> 8),
+                                             0x80, 0xBB, 0, 0, 0, 0, 0]
+        let end = table.mNumberValidFrames > 0 ? table.mNumberValidFrames + Int64(preSkip) : 0
+        return Stream(head: head, packets: packets, endGranule: end)
     }
 
     static func tags(_ url: URL) -> [String: String] {
@@ -167,22 +253,5 @@ enum OpusRemux {
         walk(0, bytes.count, 0)
         guard !failed, opusTrack != nil, !packets.isEmpty else { return nil }
         return Stream(head: head, packets: packets, endGranule: 0)
-    }
-
-    private static func frameCount(_ packet: [UInt8]) -> UInt32 {
-        let config = Int(packet[0] >> 3)
-        let tenthsMs: Int
-        switch config {
-        case 0..<12: tenthsMs = [100, 200, 400, 600][config % 4]
-        case 12..<16: tenthsMs = [100, 200][config % 2]
-        default: tenthsMs = [25, 50, 100, 200][config % 4]
-        }
-        let frames: Int
-        switch packet[0] & 3 {
-        case 0: frames = 1
-        case 1, 2: frames = 2
-        default: frames = packet.count > 1 ? Int(packet[1] & 0x3F) : 1
-        }
-        return UInt32(frames * tenthsMs * 48 / 10)
     }
 }

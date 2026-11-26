@@ -41,6 +41,9 @@ jobs:
       - name: Build Rust backend (iOS 12, arm64)
         run: bash scripts/build_backend.sh
 
+      - name: Build libopus (iOS 12, arm64)
+        run: bash scripts/build_opus.sh
+
       - name: Build app
         run: |
           xcodegen generate

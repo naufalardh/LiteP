@@ -152,7 +152,7 @@ final class DownloadManager {
             parts.append(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))
         }
         if OpusRemux.extensions.contains(url.pathExtension.lowercased()) {
-            parts.append("Opus, converted to .caf for iOS 12")
+            parts.append("Opus, converted to AAC .m4a for iOS 12")
         } else if !LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) {
             parts.append(".\(url.pathExtension) can't play on iOS 12")
         }
