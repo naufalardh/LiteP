@@ -408,3 +408,59 @@ final class DetailHeader: UIView {
         layout(bounds.width)
     }
 }
+
+/// Small popup at the top of the screen that fades away after a couple of seconds.
+enum Toast {
+    private static weak var current: UIView?
+
+    static func show(_ text: String) {
+        guard let window = UIApplication.shared.keyWindow else { return }
+        current?.removeFromSuperview()
+        let label = Theme.label(14, .semibold, .black)
+        label.text = text
+        label.textAlignment = .center
+        let pill = UIView()
+        pill.backgroundColor = .white
+        pill.layer.cornerRadius = 18
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.4
+        pill.layer.shadowRadius = 8
+        pill.layer.shadowOffset = CGSize(width: 0, height: 2)
+        let maxWidth = min(window.bounds.width - 32, 440)
+        let width = min(maxWidth, label.sizeThatFits(CGSize(width: maxWidth, height: 36)).width + 36)
+        pill.frame = CGRect(x: (window.bounds.width - width) / 2, y: window.safeAreaInsets.top + 6, width: width, height: 36)
+        label.frame = pill.bounds.insetBy(dx: 16, dy: 0)
+        pill.addSubview(label)
+        pill.alpha = 0
+        pill.transform = CGAffineTransform(translationX: 0, y: -12)
+        window.addSubview(pill)
+        current = pill
+        UIView.animate(withDuration: 0.2) {
+            pill.alpha = 1
+            pill.transform = .identity
+        }
+        UIView.animate(withDuration: 0.3, delay: 2.2, options: [.allowUserInteraction], animations: { pill.alpha = 0 }) { _ in
+            pill.removeFromSuperview()
+        }
+    }
+}
+
+/// User choices from Settings › Defaults.
+enum Defaults {
+    private static let store = UserDefaults.standard
+    /// Search extension id; "" searches all sources.
+    static var searchSource: String {
+        get { store.string(forKey: "defaultSearch") ?? "" }
+        set { store.set(newValue, forKey: "defaultSearch") }
+    }
+    /// Download extension id; "" asks every time.
+    static var downloadProvider: String {
+        get { store.string(forKey: "defaultDownload") ?? "" }
+        set { store.set(newValue, forKey: "defaultDownload") }
+    }
+    /// Quality id for `downloadProvider`; "" asks every time.
+    static var quality: String {
+        get { store.string(forKey: "defaultQuality") ?? "" }
+        set { store.set(newValue, forKey: "defaultQuality") }
+    }
+}

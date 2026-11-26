@@ -284,14 +284,11 @@ final class DownloadsViewController: UITableViewController {
             delete.isEnabled = !selectedJobs.isEmpty
             navigationItem.rightBarButtonItems = [editButtonItem, delete]
         } else {
-            navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Clear done", style: .plain, target: self, action: #selector(clear))
-            navigationItem.leftBarButtonItem?.isEnabled = jobs().contains { $0.done }
+            navigationItem.leftBarButtonItem = nil
             navigationItem.rightBarButtonItems = [editButtonItem]
             editButtonItem.isEnabled = !jobs().isEmpty
         }
     }
-
-    @objc private func clear() { DownloadManager.shared.clearFinished() }
 
     @objc private func toggleSelectAll() {
         let all = selectedJobs.count == jobs().count

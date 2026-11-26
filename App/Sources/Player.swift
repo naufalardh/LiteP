@@ -15,9 +15,23 @@ final class Player: NSObject {
         }
     }
 
-    private let player = AVQueuePlayer()
+    /// Crossfade length in seconds (0 = off). When on, the next song starts on the second player while volumes ramp.
+    static var crossfade: Int {
+        get { UserDefaults.standard.integer(forKey: "crossfade") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "crossfade")
+            shared.preloadNext()
+        }
+    }
+
+    private let players = [AVQueuePlayer(), AVQueuePlayer()]
+    private var active = 0
+    private var player: AVQueuePlayer { players[active] }
+    private var outgoing: AVQueuePlayer?
+    private var fadeTimer: Timer?
     private var statusObserver: NSKeyValueObservation?
-    private var itemObserver: NSKeyValueObservation?
+    private var itemObservers: [NSKeyValueObservation] = []
+    private var timeObservers: [Any] = []
     private var playing: AVPlayerItem?
     private var preloaded: AVPlayerItem?
     private var preloadedIndex = 0
@@ -37,8 +51,15 @@ final class Player: NSObject {
         super.init()
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
         NotificationCenter.default.addObserver(self, selector: #selector(ended), name: .AVPlayerItemDidPlayToEndTime, object: nil)
-        itemObserver = player.observe(\.currentItem) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.advanced() }
+        for p in players {
+            itemObservers.append(p.observe(\.currentItem) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.advanced() }
+            })
+            timeObservers.append(p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
+                [weak self, weak p] _ in
+                guard let self = self, p === self.player else { return }
+                self.checkCrossfade()
+            })
         }
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
@@ -145,8 +166,50 @@ final class Player: NSObject {
         }
     }
 
+    private func checkCrossfade() {
+        let fade = Double(Player.crossfade)
+        guard fade > 0, outgoing == nil, isPlaying, repeatMode != 2, duration > fade * 2, position >= duration - fade else { return }
+        let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
+        guard nextIndex >= 0 else { return }
+        let old = player
+        let incoming = players[1 - active]
+        let item = AVPlayerItem(url: queue[nextIndex].url)
+        incoming.removeAllItems()
+        incoming.volume = 0
+        incoming.actionAtItemEnd = .pause
+        incoming.insert(item, after: nil)
+        active = 1 - active
+        index = nextIndex
+        playing = item
+        preloaded = nil
+        watch(item, queue[index])
+        incoming.play()
+        outgoing = old
+        let start = Date()
+        fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            let t = min(1, Date().timeIntervalSince(start) / fade)
+            incoming.volume = Float(t)
+            old.volume = Float(1 - t)
+            if t >= 1 { self?.finishFade() }
+        }
+        update()
+    }
+
+    private func finishFade() {
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        if let old = outgoing {
+            old.pause()
+            old.removeAllItems()
+            old.volume = 1
+        }
+        outgoing = nil
+        player.volume = 1
+    }
+
     private func load() {
         guard let item = current else { return }
+        finishFade()
         try? AVAudioSession.sharedInstance().setActive(true)
         let playerItem = AVPlayerItem(url: item.url)
         preloaded = nil
@@ -177,7 +240,7 @@ final class Player: NSObject {
             preloaded = nil
         }
         let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
-        guard Player.gapless, repeatMode != 2, nextIndex >= 0, let playing = playing, player.currentItem === playing else {
+        guard Player.gapless, Player.crossfade == 0, repeatMode != 2, nextIndex >= 0, let playing = playing, player.currentItem === playing else {
             player.actionAtItemEnd = .pause
             return
         }
@@ -195,7 +258,7 @@ final class Player: NSObject {
         player.play()
         update()
     }
-    func pause() { player.pause(); update() }
+    func pause() { finishFade(); player.pause(); update() }
     func next() {
         if index + 1 < queue.count {
             index += 1

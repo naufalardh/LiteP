@@ -7,7 +7,10 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
     private let searchBar = UISearchBar()
     private let pills = PillBar(["Songs", "Artists", "Albums"])
     private var results: [Track] = []
-    private var sourceId = ""
+    private var sourceId: String {
+        get { Defaults.searchSource }
+        set { Defaults.searchSource = newValue }
+    }
     private var message = ""
     private var recent: [String] {
         get { UserDefaults.standard.stringArray(forKey: "recentSearches") ?? [] }
@@ -40,6 +43,11 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
     }
 
     private var mode: Int { pills.selected }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        updateSource()
+    }
 
     private var groups: [SearchGroup] {
         let artists = mode == 1
@@ -430,11 +438,13 @@ extension UIViewController {
 
     /// Asks which download extension and quality to use, then queues the tracks.
     func download(_ tracks: [Track], from view: UIView?) {
+        guard !tracks.isEmpty else { return }
         let providers = Lite.shared.downloadExtensions
         guard !providers.isEmpty else {
             alert("No download extension", "Install and enable an extension with a download provider first.")
             return
         }
+        if let ext = providers.first(where: { $0.str("id") == Defaults.downloadProvider }) { return pickQuality(tracks, ext, view) }
         let sheet = UIAlertController(title: "Download with", message: tracks.count == 1 ? tracks[0].title : songCount(tracks.count),
                                       preferredStyle: .actionSheet)
         for ext in providers {
@@ -447,8 +457,14 @@ extension UIViewController {
     private func pickQuality(_ tracks: [Track], _ ext: [String: Any], _ view: UIView?) {
         let options = ext["quality_options"] as? [[String: Any]] ?? []
         let id = ext.str("id")
-        let enqueue = { (quality: String) in tracks.forEach { DownloadManager.shared.enqueue($0, provider: id, quality: quality) } }
+        let enqueue = { (quality: String) in
+            tracks.forEach { DownloadManager.shared.enqueue($0, provider: id, quality: quality) }
+            Toast.show(tracks.count == 1 ? "Downloading \u{201C}\(tracks[0].title)\u{201D}" : "Downloading \(songCount(tracks.count))")
+        }
         guard options.count > 1 else { return enqueue(options.first?.str("id") ?? "LOSSLESS") }
+        if Defaults.downloadProvider == id, let saved = options.first(where: { $0.str("id") == Defaults.quality }) {
+            return enqueue(saved.str("id"))
+        }
         let sheet = UIAlertController(title: "Quality", message: nil, preferredStyle: .actionSheet)
         for option in options {
             let label = option.str("label").isEmpty ? option.str("id") : option.str("label")
