@@ -27,6 +27,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         window?.makeKeyAndVisible()
         _ = Player.shared
         Lite.shared.start {
+            LibraryStore.shared.scan {}
             if let error = Lite.shared.startError {
                 tabs.selectedViewController?.alert("Backend failed to start", error)
             }
