@@ -10,6 +10,7 @@ struct LibraryItem: Codable {
     var modified: Double
     /// 0 when the file has no track number; nil for entries indexed before track numbers were read.
     var trackNumber: Int?
+    var discNumber: Int?
     var url: URL { URL(fileURLWithPath: path) }
     /// Path inside Documents/Music without extension, stable across reinstalls and Opus → AAC conversion.
     var key: String {
@@ -72,7 +73,7 @@ final class LibraryStore {
                 }
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
-                if let old = known[url.path], old.modified == modified, old.trackNumber != nil,
+                if let old = known[url.path], old.modified == modified, old.discNumber != nil,
                    old.coverPath.map({ fm.fileExists(atPath: $0) }) ?? true {
                     result.append(old)
                     continue
@@ -106,6 +107,10 @@ final class LibraryStore {
                                  ("album", ["album", "album_name"]), ("album_artist", ["album_artist"])] {
                 if let value = names.map({ meta.str($0) }).first(where: { !$0.isEmpty }) { fields[key] = value }
             }
+            for (key, names) in [("track_number", ["track_number", "track", "tracknumber"]),
+                                 ("disc_number", ["disc_number", "disc", "discnumber"])] {
+                if let value = names.map({ meta.int($0) }).first(where: { $0 > 0 }) { fields[key] = String(value) }
+            }
         }
         let parts = url.deletingPathExtension().lastPathComponent.components(separatedBy: " - ")
         if fields["title"] == nil, parts.count == 2 {
@@ -131,12 +136,13 @@ final class LibraryStore {
 
     private func read(_ url: URL, modified: Double) -> LibraryItem {
         let name = url.deletingPathExtension().lastPathComponent
-        var item = LibraryItem(path: url.path, title: name, artist: "", album: "", coverPath: nil, modified: modified, trackNumber: 0)
+        var item = LibraryItem(path: url.path, title: name, artist: "", album: "", coverPath: nil, modified: modified, trackNumber: 0, discNumber: 0)
         let meta = jsonMap(try? Lite.shared.backend.readFileMetadata(path: url.path, hint: url.lastPathComponent))
         for key in ["title", "track_name", "name"] where !meta.str(key).isEmpty { item.title = meta.str(key); break }
         for key in ["artist", "artist_name", "artists"] where !meta.str(key).isEmpty { item.artist = meta.str(key); break }
         for key in ["album", "album_name"] where !meta.str(key).isEmpty { item.album = meta.str(key); break }
         for key in ["track_number", "track", "tracknumber"] where meta.int(key) > 0 { item.trackNumber = meta.int(key); break }
+        for key in ["disc_number", "disc", "discnumber"] where meta.int(key) > 0 { item.discNumber = meta.int(key); break }
         if url.pathExtension.lowercased() == "caf" {
             let tags = OpusRemux.tags(url)
             if let v = tags[kAFInfoDictionary_Title], item.title == name { item.title = v }

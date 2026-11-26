@@ -70,7 +70,8 @@ final class PlaylistStore {
 private func before(_ a: String, _ b: String) -> Bool { a.localizedCaseInsensitiveCompare(b) == .orderedAscending }
 
 private func albumOrder(_ a: LibraryItem, _ b: LibraryItem) -> Bool {
-    if a.album != b.album { return before(a.albumName, b.albumName) }
+    if a.albumName.lowercased() != b.albumName.lowercased() { return before(a.albumName, b.albumName) }
+    if (a.discNumber ?? 0) != (b.discNumber ?? 0) { return (a.discNumber ?? 0) < (b.discNumber ?? 0) }
     if (a.trackNumber ?? 0) != (b.trackNumber ?? 0) { return (a.trackNumber ?? 0) < (b.trackNumber ?? 0) }
     return before(a.title, b.title)
 }
@@ -213,7 +214,9 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
             let artist = mode == 0
             list = SongListViewController(title: row.title, grouped: artist) {
                 let items = LibraryStore.shared.items.filter {
-                    artist ? $0.artistName == row.title : ($0.albumName == row.title && $0.artistName == row.items[0].artistName)
+                    let same = { (x: String, y: String) in x.caseInsensitiveCompare(y) == .orderedSame }
+                    return artist ? $0.artistName == row.title
+                        : same($0.albumName, row.title) && same($0.artistName, row.items[0].artistName)
                 }
                 return items.sorted(by: albumOrder)
             }
