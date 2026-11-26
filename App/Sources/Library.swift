@@ -36,7 +36,11 @@ final class LibraryStore {
             while let url = files?.nextObject() as? URL {
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
-                if let old = known[url.path], old.modified == modified { result.append(old); continue }
+                if let old = known[url.path], old.modified == modified,
+                   old.coverPath.map({ fm.fileExists(atPath: $0) }) ?? true {
+                    result.append(old)
+                    continue
+                }
                 autoreleasepool { result.append(self.read(url, modified: modified)) }
             }
             result.sort { ($0.artist.lowercased(), $0.album.lowercased(), $0.title.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased(), $1.title.lowercased()) }
