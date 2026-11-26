@@ -3,7 +3,7 @@ import Foundation
 
 /// Repackages Ogg or WebM Opus into CAF, which iOS 11+ plays natively. Packets are copied as-is (no re-encoding).
 enum OpusRemux {
-    static let extensions: Set<String> = ["opus", "ogg", "oga"]
+    static let extensions: Set<String> = ["opus", "ogg", "oga", "webm"]
 
     private struct Stream { var head: [UInt8]; var packets: [[UInt8]]; var endGranule: Int64 }
 
@@ -138,7 +138,7 @@ enum OpusRemux {
             var pos = start
             while pos < end && !failed {
                 guard let id = vint(&pos, keepMarker: true), let size = vint(&pos, keepMarker: false) else { failed = true; return }
-                if size != UInt64.max && size > UInt64(end - pos) { failed = true; return }
+                if pos > end || (size != UInt64.max && size > UInt64(end - pos)) { failed = true; return }
                 let bodyEnd = size == UInt64.max ? end : pos + Int(size)
                 let leaf = { Array(bytes[pos..<bodyEnd]) }
                 switch UInt32(truncatingIfNeeded: id) {
