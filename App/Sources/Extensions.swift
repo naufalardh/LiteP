@@ -7,6 +7,7 @@ final class ExtensionsViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Extensions"
+        navigationItem.leftBarButtonItem = editButtonItem
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Refresh", style: .plain, target: self, action: #selector(refreshCatalog))
         NotificationCenter.default.addObserver(tableView!, selector: #selector(UITableView.reloadData), name: Lite.extensionsChanged, object: nil)
         refreshCatalog()
@@ -120,7 +121,6 @@ final class ExtensionsViewController: UITableViewController {
             toggle.tag = indexPath.row
             toggle.addTarget(self, action: #selector(toggled(_:)), for: .valueChanged)
             cell.accessoryView = toggle
-            cell.selectionStyle = .none
         default:
             let entry = catalog[indexPath.row]
             cell.textLabel?.text = entry.extName
@@ -144,6 +144,15 @@ final class ExtensionsViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if indexPath.section == 0, indexPath.row == Lite.shared.repoURLs.count { addRepo() }
+        if indexPath.section == 1 {
+            let ext = Lite.shared.extensions[indexPath.row]
+            let sheet = UIAlertController(title: ext.extName, message: nil, preferredStyle: .actionSheet)
+            sheet.addAction(UIAlertAction(title: "Delete extension", style: .destructive) { _ in self.removeExtension(ext.str("id")) })
+            sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            sheet.popoverPresentationController?.sourceView = tableView
+            sheet.popoverPresentationController?.sourceRect = tableView.rectForRow(at: indexPath)
+            present(sheet, animated: true)
+        }
         if indexPath.section == 2 {
             let entry = catalog[indexPath.row]
             if !(entry["is_installed"] as? Bool ?? false) || (entry["has_update"] as? Bool ?? false) { install(entry) }
@@ -162,12 +171,15 @@ final class ExtensionsViewController: UITableViewController {
             setRepos(urls)
             tableView.reloadData()
         } else {
-            let id = Lite.shared.extensions[indexPath.row].str("id")
-            Lite.shared.call("removeExtension", ["extension_id": id]) { _, error in
-                if let error = error { self.alert("Error", error.localizedDescription) }
-                Lite.shared.reloadExtensions()
-                self.refreshCatalog()
-            }
+            removeExtension(Lite.shared.extensions[indexPath.row].str("id"))
+        }
+    }
+
+    private func removeExtension(_ id: String) {
+        Lite.shared.call("removeExtension", ["extension_id": id]) { _, error in
+            if let error = error { self.alert("Error", error.localizedDescription) }
+            Lite.shared.reloadExtensions()
+            self.refreshCatalog()
         }
     }
 }
