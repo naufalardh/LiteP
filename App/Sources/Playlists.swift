@@ -282,12 +282,12 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
 
     @objc private func reload() {
         let shown = { self.rows.map { $0.playlistId ?? $0.title } + self.songs.map { $0.path } }
-        let before = shown()
+        let listed = shown()
         let keep = isEditing ? tableView.indexPathsForSelectedRows ?? [] : []
         defer {
             if isEditing {
                 // Keep the selection only if the same rows are still listed in the same order.
-                if shown() == before { keep.forEach { tableView.selectRow(at: $0, animated: false, scrollPosition: .none) } }
+                if shown() == listed { keep.forEach { tableView.selectRow(at: $0, animated: false, scrollPosition: .none) } }
                 updateButtons()
             }
         }
