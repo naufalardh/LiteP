@@ -46,7 +46,11 @@ final class Player: NSObject {
     }
 
     func toggle() { isPlaying ? pause() : resume() }
-    func resume() { player.play(); update() }
+    func resume() {
+        if duration > 0 && position >= duration - 0.5 { player.seek(to: .zero) }
+        player.play()
+        update()
+    }
     func pause() { player.pause(); update() }
     func next() { guard index + 1 < queue.count else { return }; index += 1; load() }
     func previous() {
