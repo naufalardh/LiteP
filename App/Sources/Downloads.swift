@@ -54,6 +54,9 @@ final class DownloadManager {
             if job.status != "Cancelled" {
                 if let error = error {
                     job.status = "Failed: \(error.localizedDescription)"
+                } else if result["success"] as? Bool == true,
+                          !result.str("decryption_key").isEmpty || result["decryption"] != nil {
+                    job.status = "Failed: track needs decryption, which requires FFmpeg (not included in Lite)"
                 } else if result["success"] as? Bool == true {
                     job.status = "Done"
                     job.progress = 1
