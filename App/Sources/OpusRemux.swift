@@ -64,7 +64,7 @@ enum OpusRemux {
         ok = ok && count == UInt32(descriptions.count)
         let valid = max(0, (granule > 0 ? min(totalFrames, granule) : totalFrames) - Int64(preSkip))
         var table = AudioFilePacketTableInfo(mNumberValidFrames: valid, mPrimingFrames: Int32(preSkip),
-                                             mRemainderFrames: Int32(max(0, totalFrames - Int64(preSkip) - valid)))
+                                             mRemainderFrames: Int32(min(Int64(Int32.max), max(0, totalFrames - Int64(preSkip) - valid))))
         AudioFileSetProperty(out, kAudioFilePropertyPacketTableInfo, UInt32(MemoryLayout<AudioFilePacketTableInfo>.size), &table)
         var info = tags as CFDictionary
         AudioFileSetProperty(out, kAudioFilePropertyInfoDictionary, UInt32(MemoryLayout<CFDictionary>.size), &info)
