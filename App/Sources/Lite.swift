@@ -98,12 +98,14 @@ final class Lite {
                                     kSecReturnData as String: true]
         var item: CFTypeRef?
         if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-           let data = item as? Data, let key = String(data: data, encoding: .utf8) {
+           let data = item as? Data, let key = String(data: data, encoding: .utf8),
+           Data(base64Encoded: key)?.count == 32 {
             return key
         }
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account] as CFDictionary)
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        let key = bytes.map { String(format: "%02x", $0) }.joined()
+        let key = Data(bytes).base64EncodedString()
         let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account,
                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
                                   kSecValueData as String: Data(key.utf8)]
