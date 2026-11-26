@@ -1,8 +1,12 @@
 import UIKit
 
 final class SearchViewController: UITableViewController, UISearchBarDelegate {
+    private struct Group { let name: String; let detail: String; let tracks: [Track] }
+
     private let searchBar = UISearchBar()
+    private let modes = UISegmentedControl(items: ["Songs", "Artists", "Albums"])
     private var results: [Track] = []
+    private var opened: Group?
     private var sourceId = ""
     private var message = "Add a repository and install extensions in the Extensions tab, then search here."
 
@@ -15,10 +19,44 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         tableView.tableHeaderView = searchBar
         tableView.rowHeight = 56
         tableView.keyboardDismissMode = .onDrag
+        modes.selectedSegmentIndex = 0
+        modes.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
+        navigationItem.titleView = modes
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Source", style: .plain, target: self, action: #selector(pickSource))
         NotificationCenter.default.addObserver(self, selector: #selector(updateSource), name: Lite.extensionsChanged, object: nil)
         updateSource()
     }
+
+    @objc private func modeChanged() { close() }
+
+    @objc private func close() {
+        opened = nil
+        navigationItem.leftBarButtonItem = nil
+        tableView.reloadData()
+    }
+
+    private var groups: [Group] {
+        let key: (Track) -> String = modes.selectedSegmentIndex == 1
+            ? { $0.artist.components(separatedBy: ", ").first ?? $0.artist }
+            : { $0.album.isEmpty ? "" : "\($0.album)\u{1}\($0.artist)" }
+        var order: [String] = []
+        var map: [String: [Track]] = [:]
+        for track in results {
+            let k = key(track)
+            guard !k.isEmpty else { continue }
+            if map[k] == nil { order.append(k) }
+            map[k, default: []].append(track)
+        }
+        return order.map { k in
+            let tracks = map[k] ?? []
+            let parts = k.components(separatedBy: "\u{1}")
+            let count = "\(tracks.count) song\(tracks.count == 1 ? "" : "s")"
+            return Group(name: parts[0], detail: parts.count > 1 ? "\(parts[1]) · \(count)" : count, tracks: tracks)
+        }
+    }
+
+    private var showingGroups: Bool { opened == nil && modes.selectedSegmentIndex != 0 }
+    private var tracks: [Track] { opened?.tracks ?? results }
 
     @objc private func updateSource() {
         let match = Lite.shared.searchExtensions.first { $0.str("id") == sourceId }
@@ -43,7 +81,7 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         guard !query.isEmpty else { return }
         message = "Searching…"
         results = []
-        tableView.reloadData()
+        close()
         let done: (Any?, Error?) -> Void = { [weak self] value, error in
             guard let self = self else { return }
             self.results = jsonList(value).map { Track(raw: $0) }
@@ -51,69 +89,98 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
             self.tableView.reloadData()
         }
         if sourceId.isEmpty {
-            Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 30, "include_extensions": true], done: done)
+            Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 50, "include_extensions": true], done: done)
         } else if let ext = Lite.shared.searchExtensions.first(where: { $0.str("id") == sourceId }),
                   (ext["search_behavior"] as? [String: Any])?["enabled"] as? Bool != true {
-            Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 30], done: done)
+            Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 50], done: done)
         } else {
             Lite.shared.call("customSearchWithExtension", ["extension_id": sourceId, "query": query, "options": "{}",
                                                            "request_id": UUID().uuidString], done: done)
         }
     }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { max(results.count, 1) }
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { opened?.name }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        if showingGroups { return max(groups.count, 1) }
+        return opened != nil ? tracks.count + 1 : max(tracks.count, 1)
+    }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "s") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "s")
         cell.detailTextLabel?.textColor = .gray
-        if results.isEmpty {
-            cell.textLabel?.text = message
+        cell.textLabel?.numberOfLines = 1
+        cell.textLabel?.textColor = .black
+        cell.selectionStyle = .default
+        cell.accessoryType = .none
+        let empty = showingGroups ? groups.isEmpty : (opened == nil && tracks.isEmpty)
+        if empty {
+            cell.textLabel?.text = message.isEmpty ? "No results" : message
             cell.textLabel?.numberOfLines = 0
             cell.textLabel?.textColor = .gray
             cell.detailTextLabel?.text = nil
             cell.selectionStyle = .none
             return cell
         }
-        let track = results[indexPath.row]
+        if showingGroups {
+            let group = groups[indexPath.row]
+            cell.textLabel?.text = group.name
+            cell.detailTextLabel?.text = group.detail
+            cell.accessoryType = .disclosureIndicator
+            return cell
+        }
+        if opened != nil && indexPath.row == 0 {
+            cell.textLabel?.text = "Download all (\(tracks.count))"
+            cell.textLabel?.textColor = view.tintColor
+            cell.detailTextLabel?.text = nil
+            return cell
+        }
+        let track = tracks[indexPath.row - (opened != nil ? 1 : 0)]
         cell.textLabel?.text = track.title
-        cell.textLabel?.numberOfLines = 1
-        cell.textLabel?.textColor = .black
         cell.detailTextLabel?.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
-        cell.selectionStyle = .default
         return cell
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard results.indices.contains(indexPath.row) else { return }
-        let track = results[indexPath.row]
-        let providers = Lite.shared.downloadExtensions
         let cell = tableView.cellForRow(at: indexPath)
+        if showingGroups {
+            guard groups.indices.contains(indexPath.row) else { return }
+            opened = groups[indexPath.row]
+            navigationItem.leftBarButtonItem = UIBarButtonItem(title: "Back", style: .plain, target: self, action: #selector(close))
+            tableView.reloadData()
+            return
+        }
+        if opened != nil && indexPath.row == 0 { return pickProvider(tracks, cell) }
+        let index = indexPath.row - (opened != nil ? 1 : 0)
+        guard tracks.indices.contains(index) else { return }
+        pickProvider([tracks[index]], cell)
+    }
+
+    private func pickProvider(_ tracks: [Track], _ cell: UITableViewCell?) {
+        let providers = Lite.shared.downloadExtensions
         guard !providers.isEmpty else {
             alert("No download extension", "Install and enable an extension with a download provider first.")
             return
         }
-        let sheet = UIAlertController(title: "Download with", message: track.title, preferredStyle: .actionSheet)
+        let sheet = UIAlertController(title: "Download with", message: tracks.count == 1 ? tracks[0].title : "\(tracks.count) songs",
+                                      preferredStyle: .actionSheet)
         for ext in providers {
-            sheet.addAction(UIAlertAction(title: ext.extName, style: .default) { _ in self.pickQuality(track, ext, cell) })
+            sheet.addAction(UIAlertAction(title: ext.extName, style: .default) { _ in self.pickQuality(tracks, ext, cell) })
         }
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         present(sheet, from: cell)
     }
 
-    private func pickQuality(_ track: Track, _ ext: [String: Any], _ cell: UITableViewCell?) {
+    private func pickQuality(_ tracks: [Track], _ ext: [String: Any], _ cell: UITableViewCell?) {
         let options = ext["quality_options"] as? [[String: Any]] ?? []
         let id = ext.str("id")
-        guard options.count > 1 else {
-            DownloadManager.shared.enqueue(track, provider: id, quality: options.first?.str("id") ?? "LOSSLESS")
-            return
-        }
+        let enqueue = { (quality: String) in tracks.forEach { DownloadManager.shared.enqueue($0, provider: id, quality: quality) } }
+        guard options.count > 1 else { return enqueue(options.first?.str("id") ?? "LOSSLESS") }
         let sheet = UIAlertController(title: "Quality", message: nil, preferredStyle: .actionSheet)
         for option in options {
             let label = option.str("label").isEmpty ? option.str("id") : option.str("label")
-            sheet.addAction(UIAlertAction(title: label, style: .default) { _ in
-                DownloadManager.shared.enqueue(track, provider: id, quality: option.str("id"))
-            })
+            sheet.addAction(UIAlertAction(title: label, style: .default) { _ in enqueue(option.str("id")) })
         }
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         present(sheet, from: cell)

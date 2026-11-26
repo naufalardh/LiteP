@@ -11,6 +11,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             (DownloadsViewController(style: .plain), "Downloads"),
             (LibraryViewController(style: .plain), "Library"),
             (ExtensionsViewController(style: .grouped), "Extensions"),
+            (SettingsViewController(style: .grouped), "Settings"),
         ]
         tabs.viewControllers = roots.map { vc, title in
             let nav = UINavigationController(rootViewController: vc)
@@ -30,6 +31,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             }
         }
         return true
+    }
+
+    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        Verification.shared.handle(url)
     }
 
     func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
