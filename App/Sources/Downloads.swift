@@ -277,7 +277,7 @@ final class DownloadsViewController: UITableViewController {
         if isEditing {
             let all = !jobs().isEmpty && selectedJobs.count == jobs().count
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: all ? "Deselect All" : "Select All", style: .plain,
-                                                               target: self, action: #selector(selectAll))
+                                                               target: self, action: #selector(toggleSelectAll))
             let delete = UIBarButtonItem(title: selectedJobs.isEmpty ? "Delete" : "Delete (\(selectedJobs.count))", style: .plain,
                                          target: self, action: #selector(deleteSelected))
             delete.tintColor = Theme.red
@@ -293,7 +293,7 @@ final class DownloadsViewController: UITableViewController {
 
     @objc private func clear() { DownloadManager.shared.clearFinished() }
 
-    @objc private func selectAll() {
+    @objc private func toggleSelectAll() {
         let all = selectedJobs.count == jobs().count
         for row in jobs().indices {
             let path = IndexPath(row: row, section: 0)
