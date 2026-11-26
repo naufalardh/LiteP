@@ -6,8 +6,21 @@ final class Player: NSObject {
     static let shared = Player()
     static let changed = Notification.Name("LitePlayerChanged")
 
-    private let player = AVPlayer()
+    /// Preloads the next song in AVQueuePlayer so it starts without a pause.
+    static var gapless: Bool {
+        get { UserDefaults.standard.object(forKey: "gapless") as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "gapless")
+            shared.preloadNext()
+        }
+    }
+
+    private let player = AVQueuePlayer()
     private var statusObserver: NSKeyValueObservation?
+    private var itemObserver: NSKeyValueObservation?
+    private var playing: AVPlayerItem?
+    private var preloaded: AVPlayerItem?
+    private var preloadedIndex = 0
     private var original: [LibraryItem] = []
     private(set) var queue: [LibraryItem] = []
     private(set) var index = 0
@@ -15,6 +28,7 @@ final class Player: NSObject {
     /// 0 off, 1 repeat queue, 2 repeat song.
     private(set) var repeatMode = 0
     var current: LibraryItem? { queue.indices.contains(index) ? queue[index] : nil }
+    var upNext: [LibraryItem] { Array(queue.dropFirst(index + 1)) }
     var isPlaying: Bool { player.rate > 0 }
     var position: Double { player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0 }
     var duration: Double { player.currentItem?.duration.seconds.isFinite == true ? player.currentItem!.duration.seconds : 0 }
@@ -23,6 +37,9 @@ final class Player: NSObject {
         super.init()
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
         NotificationCenter.default.addObserver(self, selector: #selector(ended), name: .AVPlayerItemDidPlayToEndTime, object: nil)
+        itemObserver = player.observe(\.currentItem) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.advanced() }
+        }
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
         center.pauseCommand.addTarget { [weak self] _ in self?.pause(); return .success }
@@ -55,6 +72,43 @@ final class Player: NSObject {
         load()
     }
 
+    func playNext(_ items: [LibraryItem]) {
+        guard current != nil else { return play(items, at: 0) }
+        queue.insert(contentsOf: items, at: index + 1)
+        original += items
+        queueChanged()
+    }
+
+    func addToQueue(_ items: [LibraryItem]) {
+        guard current != nil else { return play(items, at: 0) }
+        queue += items
+        original += items
+        queueChanged()
+    }
+
+    /// Indexes are positions in `upNext`.
+    func moveUpNext(from: Int, to: Int) {
+        let f = index + 1 + from, t = index + 1 + to
+        guard queue.indices.contains(f), queue.indices.contains(t) else { return }
+        queue.insert(queue.remove(at: f), at: t)
+        queueChanged()
+    }
+
+    func removeUpNext(at i: Int) {
+        let f = index + 1 + i
+        guard queue.indices.contains(f) else { return }
+        let removed = queue.remove(at: f)
+        if let o = original.firstIndex(where: { $0.path == removed.path }) { original.remove(at: o) }
+        queueChanged()
+    }
+
+    func jump(toUpNext i: Int) {
+        let f = index + 1 + i
+        guard queue.indices.contains(f) else { return }
+        index = f
+        load()
+    }
+
     func toggleShuffle() {
         shuffled.toggle()
         if shuffled {
@@ -63,11 +117,16 @@ final class Player: NSObject {
             queue = original
             index = original.firstIndex { $0.path == now.path } ?? 0
         }
-        update()
+        queueChanged()
     }
 
     func cycleRepeat() {
         repeatMode = (repeatMode + 1) % 3
+        queueChanged()
+    }
+
+    private func queueChanged() {
+        preloadNext()
         update()
     }
 
@@ -79,21 +138,59 @@ final class Player: NSObject {
         index = 0
     }
 
-    private func load() {
-        guard let item = current else { return }
-        try? AVAudioSession.sharedInstance().setActive(true)
-        let playerItem = AVPlayerItem(url: item.url)
+    private func watch(_ playerItem: AVPlayerItem, _ item: LibraryItem) {
         statusObserver = playerItem.observe(\.status) { observed, _ in
             guard observed.status == .failed else { return }
             NSLog("MornyeLite: cannot play %@: %@", item.url.lastPathComponent, "\(observed.error.map { "\($0)" } ?? "unknown")")
         }
-        player.replaceCurrentItem(with: playerItem)
+    }
+
+    private func load() {
+        guard let item = current else { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let playerItem = AVPlayerItem(url: item.url)
+        preloaded = nil
+        playing = playerItem
+        player.removeAllItems()
+        watch(playerItem, item)
+        player.insert(playerItem, after: nil)
+        preloadNext()
         player.play()
         update()
     }
 
+    /// AVQueuePlayer moved on to the preloaded song by itself.
+    private func advanced() {
+        guard let item = player.currentItem, item !== playing, item === preloaded, queue.indices.contains(preloadedIndex) else { return }
+        index = preloadedIndex
+        playing = item
+        preloaded = nil
+        watch(item, queue[index])
+        preloadNext()
+        update()
+    }
+
+    func preloadNext() {
+        advanced()
+        if let old = preloaded {
+            player.remove(old)
+            preloaded = nil
+        }
+        let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
+        guard Player.gapless, repeatMode != 2, nextIndex >= 0, let playing = playing, player.currentItem === playing else {
+            player.actionAtItemEnd = .pause
+            return
+        }
+        let item = AVPlayerItem(url: queue[nextIndex].url)
+        player.insert(item, after: playing)
+        preloaded = item
+        preloadedIndex = nextIndex
+        player.actionAtItemEnd = .advance
+    }
+
     func toggle() { isPlaying ? pause() : resume() }
     func resume() {
+        if player.currentItem == nil { return load() }
         if duration > 0 && position >= duration - 0.5 { player.seek(to: .zero) }
         player.play()
         update()
@@ -118,7 +215,7 @@ final class Player: NSObject {
 
     @objc private func ended(_ note: Notification) {
         DispatchQueue.main.async {
-            guard (note.object as? AVPlayerItem) === self.player.currentItem else { return }
+            guard (note.object as? AVPlayerItem) === self.playing, self.preloaded == nil else { return }
             if self.repeatMode == 2 {
                 self.player.seek(to: .zero)
                 self.player.play()
@@ -163,6 +260,7 @@ final class PlayerViewController: UIViewController {
     private let nextButton = Theme.iconButton(.next, size: 30, color: Theme.text)
     private let shuffle = Theme.iconButton(.shuffle, size: 24)
     private let repeatButton = Theme.iconButton(.repeatAll, size: 24)
+    private let queueButton = Theme.iconButton(.list, size: 22, color: Theme.text)
     private var timer: Timer?
     private var shownPath: String?
 
@@ -191,6 +289,8 @@ final class PlayerViewController: UIViewController {
         nextButton.addTarget(self, action: #selector(nextTapped), for: .touchUpInside)
         shuffle.addTarget(self, action: #selector(shuffleTapped), for: .touchUpInside)
         repeatButton.addTarget(self, action: #selector(repeatTapped), for: .touchUpInside)
+        queueButton.addTarget(self, action: #selector(queueTapped), for: .touchUpInside)
+        view.addSubview(queueButton)
         [close, header, cover, titleLabel, artistLabel, slider, elapsed, remaining, shuffle, prevButton, playButton, nextButton, repeatButton]
             .forEach { view.addSubview($0) }
         let swipe = UISwipeGestureRecognizer(target: self, action: #selector(dismissTapped))
@@ -207,6 +307,7 @@ final class PlayerViewController: UIViewController {
         let x = (view.bounds.width - w) / 2
         close.frame.origin = CGPoint(x: x - 12, y: safe.minY + 4)
         header.frame = CGRect(x: x + 40, y: safe.minY + 4, width: w - 80, height: 44)
+        queueButton.frame.origin = CGPoint(x: x + w - 32, y: safe.minY + 4)
         let controls: CGFloat = 250
         let side = max(120, min(w, safe.height - 60 - controls))
         cover.frame = CGRect(x: (view.bounds.width - side) / 2, y: safe.minY + 60, width: side, height: side)
@@ -273,6 +374,84 @@ final class PlayerViewController: UIViewController {
     @objc private func shuffleTapped() { Player.shared.toggleShuffle() }
     @objc private func repeatTapped() { Player.shared.cycleRepeat() }
     @objc private func dismissTapped() { dismiss(animated: true) }
+    @objc private func queueTapped() { present(UINavigationController(rootViewController: UpNextViewController()), animated: true) }
+}
+
+/// Now playing and Up Next; drag to reorder, swipe to remove, tap to jump.
+final class UpNextViewController: UITableViewController {
+    private var ignoreChanges = false
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Queue"
+        navigationItem.largeTitleDisplayMode = .never
+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(close))
+        tableView.rowHeight = 60
+        tableView.separatorStyle = .none
+        tableView.allowsSelectionDuringEditing = true
+        setEditing(true, animated: false)
+        NotificationCenter.default.addObserver(self, selector: #selector(changed), name: Player.changed, object: nil)
+    }
+
+    @objc private func close() { dismiss(animated: true) }
+    @objc private func changed() { if !ignoreChanges { tableView.reloadData() } }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        section == 0 ? (Player.shared.current == nil ? 0 : 1) : Player.shared.upNext.count
+    }
+
+    override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat { 44 }
+
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let v = UIView()
+        v.backgroundColor = Theme.bg
+        let l = Theme.label(18, .bold)
+        l.text = section == 0 ? "Now playing" : (Player.shared.upNext.isEmpty ? "Nothing up next" : "Next up")
+        l.frame = CGRect(x: 16, y: 12, width: tableView.bounds.width - 32, height: 26)
+        v.addSubview(l)
+        return v
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        guard let item = indexPath.section == 0 ? Player.shared.current : Player.shared.upNext[indexPath.row] else { return cell }
+        Art.set(cell.art, path: item.coverPath, size: 46)
+        cell.set(item.title, item.artistName, playing: indexPath.section == 0)
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, editingStyleForRowAt indexPath: IndexPath) -> UITableViewCell.EditingStyle {
+        indexPath.section == 1 ? .delete : .none
+    }
+
+    override func tableView(_ tableView: UITableView, shouldIndentWhileEditingRowAt indexPath: IndexPath) -> Bool { indexPath.section == 1 }
+    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool { indexPath.section == 1 }
+
+    override func tableView(_ tableView: UITableView, targetIndexPathForMoveFromRowAt source: IndexPath,
+                            toProposedIndexPath proposed: IndexPath) -> IndexPath {
+        proposed.section == 1 ? proposed : IndexPath(row: 0, section: 1)
+    }
+
+    override func tableView(_ tableView: UITableView, moveRowAt source: IndexPath, to destination: IndexPath) {
+        ignoreChanges = true
+        Player.shared.moveUpNext(from: source.row, to: destination.row)
+        ignoreChanges = false
+    }
+
+    override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle, forRowAt indexPath: IndexPath) {
+        guard editingStyle == .delete, indexPath.section == 1 else { return }
+        ignoreChanges = true
+        Player.shared.removeUpNext(at: indexPath.row)
+        ignoreChanges = false
+        tableView.deleteRows(at: [indexPath], with: .automatic)
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == 1 { Player.shared.jump(toUpNext: indexPath.row) }
+    }
 }
 
 /// Bar above the tab bar showing the current song.

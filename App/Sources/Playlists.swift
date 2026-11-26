@@ -78,7 +78,7 @@ func albumOrder(_ a: LibraryItem, _ b: LibraryItem) -> Bool {
 
 /// Groups songs into albums (same album and artist, ignoring case), each in disc/track order.
 func albumGroups(_ items: [LibraryItem]) -> [[LibraryItem]] {
-    Dictionary(grouping: items) { "\($0.albumName.lowercased())\u{1}\($0.artistName.lowercased())" }
+    Dictionary(grouping: items) { "\($0.albumName.lowercased())\u{1}\($0.leadArtist.lowercased())" }
         .values.map { $0.sorted(by: albumOrder) }
         .sorted { before($0[0].albumName, $1[0].albumName) }
 }
@@ -113,6 +113,8 @@ extension UIViewController {
     /// The "…" menu of a song.
     func songMenu(_ item: LibraryItem, from view: UIView?, playlist: String? = nil, index: Int = 0) {
         let sheet = UIAlertController(title: item.title, message: "\(item.artistName) · \(item.albumName)", preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Play next", style: .default) { _ in Player.shared.playNext([item]) })
+        sheet.addAction(UIAlertAction(title: "Add to queue", style: .default) { _ in Player.shared.addToQueue([item]) })
         sheet.addAction(UIAlertAction(title: "Add to playlist", style: .default) { _ in self.addToPlaylist([item], from: view) })
         if let id = playlist {
             sheet.addAction(UIAlertAction(title: "Remove from this playlist", style: .destructive) { _ in
@@ -120,7 +122,7 @@ extension UIViewController {
             })
         }
         sheet.addAction(UIAlertAction(title: "Go to artist", style: .default) { _ in
-            self.navigationController?.pushViewController(SongListViewController.artist(item.artistName), animated: true)
+            self.navigationController?.pushViewController(SongListViewController.artist(item.leadArtist), animated: true)
         })
         sheet.addAction(UIAlertAction(title: "Go to album", style: .default) { _ in
             self.navigationController?.pushViewController(SongListViewController.album(item), animated: true)
@@ -132,7 +134,6 @@ extension UIViewController {
             confirm.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             confirm.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
                 LibraryStore.shared.delete(item)
-                NotificationCenter.default.post(name: Lite.libraryChanged, object: nil)
             })
             self.present(confirm, animated: true)
         })
@@ -178,11 +179,12 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
         title = "Your Library"
         pills.changed = { [weak self] index in
             UserDefaults.standard.set(index, forKey: "libraryMode")
+            self?.setEditing(false, animated: false)
             self?.reload()
         }
         tableView.tableHeaderView = pills
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: Icon.plus.image(22), style: .plain, target: self,
-                                                            action: #selector(newPlaylist))
+        tableView.allowsMultipleSelectionDuringEditing = true
+        updateButtons()
         search.searchResultsUpdater = self
         search.obscuresBackgroundDuringPresentation = false
         search.searchBar.placeholder = "Search in Your Library"
@@ -212,7 +214,81 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
         }
     }
 
+    private lazy var plusButton = UIBarButtonItem(image: Icon.plus.image(22), style: .plain, target: self, action: #selector(newPlaylist))
+
+    override func setEditing(_ editing: Bool, animated: Bool) {
+        super.setEditing(editing, animated: animated)
+        updateButtons()
+    }
+
+    private var selectable: [Int] { mode == 3 ? Array(songs.indices.map { $0 + 1 }) : Array(rows.indices) }
+
+    private var selectedRows: [Int] {
+        let valid = Set(selectable)
+        return (tableView.indexPathsForSelectedRows ?? []).map { $0.row }.filter { valid.contains($0) }
+    }
+
+    private func updateButtons() {
+        guard isEditing else {
+            navigationItem.leftBarButtonItem = editButtonItem
+            navigationItem.rightBarButtonItems = [plusButton]
+            return
+        }
+        let count = selectedRows.count
+        let all = count > 0 && count == selectable.count
+        navigationItem.leftBarButtonItem = UIBarButtonItem(title: all ? "Deselect All" : "Select All", style: .plain,
+                                                           target: self, action: #selector(toggleSelectAll))
+        let delete = UIBarButtonItem(title: count == 0 ? "Delete" : "Delete (\(count))", style: .plain, target: self,
+                                     action: #selector(deleteSelected))
+        delete.tintColor = Theme.red
+        delete.isEnabled = count > 0
+        navigationItem.rightBarButtonItems = [editButtonItem, delete]
+    }
+
+    @objc private func toggleSelectAll() {
+        let all = selectedRows.count == selectable.count
+        for row in selectable {
+            let path = IndexPath(row: row, section: 0)
+            if all { tableView.deselectRow(at: path, animated: false) } else { tableView.selectRow(at: path, animated: false, scrollPosition: .none) }
+        }
+        updateButtons()
+    }
+
+    @objc private func deleteSelected() {
+        let picked = selectedRows
+        guard !picked.isEmpty else { return }
+        if mode == 0 {
+            let ids = picked.compactMap { rows[$0].playlistId }
+            confirm("Delete \(ids.count) playlist\(ids.count == 1 ? "" : "s")?", "Songs stay in your library.") {
+                ids.forEach { PlaylistStore.shared.delete($0) }
+            }
+            return
+        }
+        let items = mode == 3 ? picked.map { songs[$0 - 1] } : picked.flatMap { rows[$0].items }
+        confirm("Delete \(songCount(items.count))?", "The files are removed from this iPad.") {
+            LibraryStore.shared.delete(items)
+        }
+    }
+
+    private func confirm(_ title: String, _ message: String, action: @escaping () -> Void) {
+        let a = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        a.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        a.addAction(UIAlertAction(title: "Delete", style: .destructive) { _ in
+            action()
+            self.setEditing(false, animated: true)
+        })
+        present(a, animated: true)
+    }
+
     @objc private func reload() {
+        let keep = isEditing ? tableView.indexPathsForSelectedRows ?? [] : []
+        defer {
+            if isEditing {
+                keep.filter { $0.row < tableView.numberOfRows(inSection: 0) }
+                    .forEach { tableView.selectRow(at: $0, animated: false, scrollPosition: .none) }
+                updateButtons()
+            }
+        }
         let q = (search.searchBar.text ?? "").lowercased()
         let all = LibraryStore.shared.items.filter {
             q.isEmpty || "\($0.title) \($0.artist) \($0.album)".lowercased().contains(q)
@@ -229,13 +305,13 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
                     return Row(title: p.name, detail: "Playlist · \(songCount(items.count))", items: items, playlistId: p.id)
                 }
         case 1:
-            let groups = Dictionary(grouping: all) { $0.artistName }
+            let groups = Dictionary(grouping: all) { $0.leadArtist }
             rows = groups.keys.sorted(by: before).map { name in
                 let items = groups[name]!.sorted(by: albumOrder)
                 return Row(title: name, detail: "Artist · \(songCount(items.count))", items: items, playlistId: nil)
             }
         case 2:
-            rows = albumGroups(all).map { Row(title: $0[0].albumName, detail: "Album · \($0[0].artistName)", items: $0, playlistId: nil) }
+            rows = albumGroups(all).map { Row(title: $0[0].albumName, detail: "Album · \($0[0].leadArtist)", items: $0, playlistId: nil) }
         default:
             songs = all.sorted { before($0.title, $1.title) }
         }
@@ -277,7 +353,16 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
         return cell
     }
 
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool { mode != 3 || indexPath.row > 0 }
+
+    override func tableView(_ tableView: UITableView, didDeselectRowAt indexPath: IndexPath) { if isEditing { updateButtons() } }
+
+    override func tableView(_ tableView: UITableView, willSelectRowAt indexPath: IndexPath) -> IndexPath? {
+        isEditing && mode == 3 && indexPath.row == 0 ? nil : indexPath
+    }
+
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        if isEditing { return updateButtons() }
         tableView.deselectRow(at: indexPath, animated: true)
         if mode == 3 {
             if indexPath.row == 0 { Player.shared.shuffle(songs) } else { Player.shared.play(songs, at: indexPath.row - 1) }
@@ -346,17 +431,17 @@ final class SongListViewController: UITableViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     static func album(_ item: LibraryItem) -> SongListViewController {
-        let album = item.albumName.lowercased(), artist = item.artistName.lowercased()
+        let album = item.albumName.lowercased(), artist = item.leadArtist.lowercased()
         return SongListViewController(kind: .album, title: item.albumName) {
             LibraryStore.shared.items
-                .filter { $0.albumName.lowercased() == album && $0.artistName.lowercased() == artist }
+                .filter { $0.albumName.lowercased() == album && $0.leadArtist.lowercased() == artist }
                 .sorted(by: albumOrder)
         }
     }
 
     static func artist(_ name: String) -> SongListViewController {
         SongListViewController(kind: .artist, title: name) {
-            LibraryStore.shared.items.filter { $0.artistName == name }.sorted(by: albumOrder)
+            LibraryStore.shared.items.filter { $0.leadArtist == name || $0.artistNames.contains(name) }.sorted(by: albumOrder)
         }
     }
 
@@ -424,7 +509,7 @@ final class SongListViewController: UITableViewController {
         }
         header.titleLabel.text = title
         switch kind {
-        case .album: header.subtitleLabel.text = "Album · \(songs.first?.artistName ?? "") · \(songCount(songs.count))"
+        case .album: header.subtitleLabel.text = "Album · \(songs.first?.leadArtist ?? "") · \(songCount(songs.count))"
         case .artist: header.subtitleLabel.text = "\(sections.count) album\(sections.count == 1 ? "" : "s") · \(songCount(songs.count))"
         case .playlist: header.subtitleLabel.text = "Playlist · \(songCount(songs.count))"
         }

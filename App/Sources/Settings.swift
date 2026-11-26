@@ -3,7 +3,7 @@ import UIKit
 final class SettingsViewController: UITableViewController {
     private var musicSize = "…"
     private var cacheSize = "…"
-    private let rows = [["Extensions & repositories"], ["Music", "Cache"], ["Clear cache", "Rescan library", "Clear finished downloads"], ["Version"]]
+    private let rows = [["Extensions & repositories", "Gapless playback"], ["Music", "Cache"], ["Clear cache", "Rescan library", "Clear finished downloads"], ["Version"]]
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -54,6 +54,10 @@ final class SettingsViewController: UITableViewController {
     }
 
     override func numberOfSections(in tableView: UITableView) -> Int { rows.count }
+    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
+        section == 0 ? "Gapless playback loads the next song early so albums play without a pause." : nil
+    }
+    @objc private func gaplessChanged(_ toggle: UISwitch) { Player.gapless = toggle.isOn }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows[section].count }
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         [nil, "Storage", nil, "About"][section]
@@ -66,7 +70,13 @@ final class SettingsViewController: UITableViewController {
         cell.textLabel?.text = rows[indexPath.section][indexPath.row]
         cell.selectionStyle = indexPath.section == 0 || indexPath.section == 2 ? .default : .none
         switch (indexPath.section, indexPath.row) {
-        case (0, _): cell.accessoryType = .disclosureIndicator
+        case (0, 0): cell.accessoryType = .disclosureIndicator
+        case (0, _):
+            let toggle = UISwitch()
+            toggle.isOn = Player.gapless
+            toggle.addTarget(self, action: #selector(gaplessChanged(_:)), for: .valueChanged)
+            cell.accessoryView = toggle
+            cell.selectionStyle = .none
         case (1, 0): cell.detailTextLabel?.text = musicSize
         case (1, 1): cell.detailTextLabel?.text = cacheSize
         case (2, 0): cell.textLabel?.textColor = Theme.red
@@ -80,6 +90,7 @@ final class SettingsViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if indexPath.section == 0 {
+            guard indexPath.row == 0 else { return }
             navigationController?.pushViewController(ExtensionsViewController(style: .grouped), animated: true)
             return
         }

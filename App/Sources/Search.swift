@@ -1,6 +1,7 @@
 import UIKit
 
 private struct SearchGroup { let name: String; let detail: String; let tracks: [Track] }
+private struct AlbumRef { let name: String; let subtitle: String; let cover: String; let provider: String; let id: String; let tracks: [Track] }
 
 final class SearchViewController: UITableViewController, UISearchBarDelegate {
     private let searchBar = UISearchBar()
@@ -168,7 +169,9 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
             return download([results[indexPath.row]], from: tableView.cellForRow(at: indexPath))
         }
         guard groups.indices.contains(indexPath.row) else { return }
-        navigationController?.pushViewController(RemoteTracksViewController(groups[indexPath.row], album: mode == 2), animated: true)
+        let group = groups[indexPath.row]
+        let page: UIViewController = mode == 1 ? ArtistPageViewController(group) : RemoteTracksViewController(group, album: true)
+        navigationController?.pushViewController(page, animated: true)
     }
 
     override func tableView(_ tableView: UITableView,
@@ -187,11 +190,13 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
 private final class RemoteTracksViewController: UITableViewController {
     private var group: SearchGroup
     private let album: Bool
+    private let ref: AlbumRef?
     private var header: DetailHeader!
 
-    init(_ group: SearchGroup, album: Bool) {
+    init(_ group: SearchGroup, album: Bool, ref: AlbumRef? = nil) {
         self.group = group
         self.album = album
+        self.ref = ref
         super.init(style: .plain)
         title = group.name
     }
@@ -206,7 +211,7 @@ private final class RemoteTracksViewController: UITableViewController {
         header = DetailHeader(width: view.bounds.width, round: !album, action: .download)
         header.shuffle.isHidden = true
         header.action.addTarget(self, action: #selector(downloadAll), for: .touchUpInside)
-        Art.set(header.art, path: nil, url: group.tracks.first?.coverURL, size: 220, placeholder: album ? .music : .person)
+        Art.set(header.art, path: nil, url: group.tracks.first?.coverURL ?? ref?.cover, size: 220, placeholder: album ? .music : .person)
         tableView.tableHeaderView = header
         refresh()
         if album { loadFullAlbum() }
@@ -225,18 +230,21 @@ private final class RemoteTracksViewController: UITableViewController {
         tableView.reloadData()
     }
 
-    @objc private func downloadAll() { download(group.tracks, from: header.action) }
+    @objc private func downloadAll() { if !group.tracks.isEmpty { download(group.tracks, from: header.action) } }
 
     /// Search only returns matching songs, so fetch the album itself to list every track.
     private func loadFullAlbum() {
-        guard let first = group.tracks.first, !first.albumId.isEmpty, !first.source.isEmpty else { return }
-        Lite.shared.call("getProviderMetadata", ["provider_id": first.source, "resource_type": "album",
-                                                 "resource_id": first.albumId]) { [weak self] value, error in
+        let first = group.tracks.first
+        let provider = ref?.provider ?? first?.source ?? "", id = ref?.id ?? first?.albumId ?? ""
+        let cover = ref?.cover ?? first?.coverURL ?? ""
+        guard !provider.isEmpty, !id.isEmpty else { return }
+        Lite.shared.call("getProviderMetadata", ["provider_id": provider, "resource_type": "album",
+                                                 "resource_id": id]) { [weak self] value, error in
             guard let self = self else { return }
             let list = jsonList(jsonMap(value)["track_list"]).map { raw -> Track in
                 var raw = raw
-                if raw.str("source").isEmpty && raw.str("provider_id").isEmpty { raw["provider_id"] = first.source }
-                if raw.str("cover_url").isEmpty && raw["images"] == nil { raw["cover_url"] = first.coverURL }
+                if raw.str("source").isEmpty && raw.str("provider_id").isEmpty { raw["provider_id"] = provider }
+                if raw.str("cover_url").isEmpty && raw["images"] == nil { raw["cover_url"] = cover }
                 return Track(raw: raw)
             }
             guard error == nil, list.count > self.group.tracks.count else { return }
@@ -260,6 +268,148 @@ private final class RemoteTracksViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         download([group.tracks[indexPath.row]], from: tableView.cellForRow(at: indexPath))
+    }
+}
+
+/// Spotify-style artist page: popular songs, then albums and singles, loaded from the artist's provider.
+private final class ArtistPageViewController: UITableViewController {
+    private let name: String
+    private var top: [Track]
+    private var albums: [AlbumRef]
+    private var cover: String
+    private var header: DetailHeader!
+
+    init(_ group: SearchGroup) {
+        name = group.name
+        top = group.tracks
+        cover = group.tracks.first?.coverURL ?? ""
+        var order: [String] = []
+        var map: [String: [Track]] = [:]
+        for t in group.tracks where !t.album.isEmpty {
+            if map[t.albumKey] == nil { order.append(t.albumKey) }
+            map[t.albumKey, default: []].append(t)
+        }
+        albums = order.compactMap { k in
+            guard let tracks = map[k], let f = tracks.first else { return nil }
+            return AlbumRef(name: f.album, subtitle: "Album", cover: f.coverURL, provider: f.source, id: f.albumId, tracks: tracks)
+        }
+        super.init(style: .plain)
+        title = name
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        navigationItem.largeTitleDisplayMode = .never
+        tableView.rowHeight = 64
+        tableView.separatorStyle = .none
+        header = DetailHeader(width: view.bounds.width, round: true, action: .download)
+        header.shuffle.isHidden = true
+        header.action.addTarget(self, action: #selector(downloadTop), for: .touchUpInside)
+        tableView.tableHeaderView = header
+        refresh()
+        loadArtist()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if header.frame.width != tableView.bounds.width { refresh() }
+    }
+
+    private func refresh() {
+        header.titleLabel.text = name
+        header.subtitleLabel.text = "Artist · \(albums.count) release\(albums.count == 1 ? "" : "s") · tap ↓ for popular songs"
+        Art.set(header.art, path: nil, url: cover, size: 220, placeholder: .person)
+        header.frame.size = CGSize(width: tableView.bounds.width, height: header.layout(tableView.bounds.width))
+        tableView.tableHeaderView = header
+        tableView.reloadData()
+    }
+
+    private var popular: [Track] { Array(top.prefix(10)) }
+
+    @objc private func downloadTop() { if !popular.isEmpty { download(popular, from: header.action) } }
+
+    private func loadArtist() {
+        guard let seed = top.first(where: { $0.primaryArtist == name && !$0.raw.str("artist_id").isEmpty && !$0.source.isEmpty })
+            ?? top.first(where: { !$0.raw.str("artist_id").isEmpty && !$0.source.isEmpty }) else { return }
+        let provider = seed.source
+        Lite.shared.call("getProviderMetadata", ["provider_id": provider, "resource_type": "artist",
+                                                 "resource_id": seed.raw.str("artist_id")]) { [weak self] value, error in
+            guard let self = self, error == nil else { return }
+            let map = jsonMap(value)
+            let info = map["artist_info"] as? [String: Any] ?? [:]
+            for key in ["cover_url", "images", "header_image"] where !info.str(key).isEmpty {
+                self.cover = info.str(key)
+                break
+            }
+            let tracks = jsonList(map["top_tracks"]).map { raw -> Track in
+                var raw = raw
+                if raw.str("source").isEmpty && raw.str("provider_id").isEmpty { raw["provider_id"] = provider }
+                return Track(raw: raw)
+            }
+            if !tracks.isEmpty { self.top = tracks }
+            var seen = Set<String>()
+            var releases: [AlbumRef] = []
+            for raw in jsonList(map["albums"]) + jsonList(map["releases"]) {
+                let id = raw.str("id")
+                guard !id.isEmpty, seen.insert(id).inserted else { continue }
+                let year = String(raw.str("release_date").prefix(4))
+                let type = raw.str("album_type").isEmpty ? "Album" : raw.str("album_type").capitalized
+                let cover = raw.str("cover_url").isEmpty ? raw.str("images") : raw.str("cover_url")
+                releases.append(AlbumRef(name: raw.str("name"), subtitle: [year, type].filter { !$0.isEmpty }.joined(separator: " · "),
+                                         cover: cover, provider: raw.str("provider_id").isEmpty ? provider : raw.str("provider_id"),
+                                         id: id, tracks: []))
+            }
+            if !releases.isEmpty { self.albums = releases }
+            self.refresh()
+        }
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        section == 0 ? popular.count : albums.count
+    }
+
+    override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        (section == 0 ? popular.isEmpty : albums.isEmpty) ? 0 : 48
+    }
+
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        let v = UIView()
+        v.backgroundColor = Theme.bg
+        let l = Theme.label(20, .bold)
+        l.text = section == 0 ? "Popular" : "Discography"
+        l.frame = CGRect(x: 16, y: 14, width: tableView.bounds.width - 32, height: 28)
+        v.addSubview(l)
+        return v
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "a") as? ArtCell ?? ArtCell(style: .default, reuseIdentifier: "a")
+        if indexPath.section == 0 {
+            let track = popular[indexPath.row]
+            Art.set(cell.art, path: nil, url: track.coverURL, size: 50)
+            cell.set("\(indexPath.row + 1)   \(track.title)", track.album)
+            cell.onMore = { [weak self] v in self?.download([track], from: v) }
+        } else {
+            let album = albums[indexPath.row]
+            Art.set(cell.art, path: nil, url: album.cover, size: 50)
+            cell.set(album.name, album.subtitle)
+            cell.accessoryType = .disclosureIndicator
+        }
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == 0 {
+            return download([popular[indexPath.row]], from: tableView.cellForRow(at: indexPath))
+        }
+        let album = albums[indexPath.row]
+        let group = SearchGroup(name: album.name, detail: "Album · \(name)", tracks: album.tracks)
+        navigationController?.pushViewController(RemoteTracksViewController(group, album: true, ref: album), animated: true)
     }
 }
 

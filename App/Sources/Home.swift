@@ -11,6 +11,7 @@ final class HomeViewController: UICollectionViewController, UICollectionViewDele
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        title = "Home"
         collectionView.alwaysBounceVertical = true
         collectionView.register(TileCell.self, forCellWithReuseIdentifier: "tile")
         collectionView.register(CardCell.self, forCellWithReuseIdentifier: "card")
@@ -24,11 +25,6 @@ final class HomeViewController: UICollectionViewController, UICollectionViewDele
         reload()
     }
 
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        let hour = Calendar.current.component(.hour, from: Date())
-        title = hour < 5 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening"
-    }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
@@ -43,7 +39,7 @@ final class HomeViewController: UICollectionViewController, UICollectionViewDele
         let albums = albumGroups(LibraryStore.shared.items)
             .sorted { ($0.map { $0.modified }.max() ?? 0) > ($1.map { $0.modified }.max() ?? 0) }
         let albumTiles = albums.prefix(12).map { items in
-            Tile(title: items[0].albumName, subtitle: items[0].artistName, cover: items.first { $0.coverPath != nil }?.coverPath,
+            Tile(title: items[0].albumName, subtitle: items[0].leadArtist, cover: items.first { $0.coverPath != nil }?.coverPath,
                  icon: .music, round: false, open: { SongListViewController.album(items[0]) })
         }
         let playlistTiles = PlaylistStore.shared.playlists.map { p -> Tile in
@@ -52,9 +48,9 @@ final class HomeViewController: UICollectionViewController, UICollectionViewDele
                         icon: .list, round: false, open: { SongListViewController(playlist: p.id) })
         }
         var artists: [String] = []
-        for album in albums where !artists.contains(album[0].artistName) { artists.append(album[0].artistName) }
+        for album in albums where !artists.contains(album[0].leadArtist) { artists.append(album[0].leadArtist) }
         let artistTiles = artists.prefix(8).map { name -> Tile in
-            let cover = LibraryStore.shared.items.first { $0.artistName == name && $0.coverPath != nil }?.coverPath
+            let cover = LibraryStore.shared.items.first { $0.leadArtist == name && $0.coverPath != nil }?.coverPath
             return Tile(title: name, subtitle: "Artist", cover: cover, icon: .person, round: true, open: { SongListViewController.artist(name) })
         }
         sections = [("", Array((playlistTiles + albumTiles).prefix(6))), ("Recently added", Array(albumTiles)),

@@ -11,6 +11,8 @@ struct LibraryItem: Codable {
     /// 0 when the file has no track number; nil for entries indexed before track numbers were read.
     var trackNumber: Int?
     var discNumber: Int?
+    /// nil for entries indexed before album artists were read.
+    var albumArtist: String?
     var url: URL { URL(fileURLWithPath: path) }
     /// Path inside Documents/Music without extension, stable across reinstalls and Opus → AAC conversion.
     var key: String {
@@ -20,6 +22,19 @@ struct LibraryItem: Codable {
     }
     var artistName: String { artist.isEmpty ? "Unknown Artist" : artist }
     var albumName: String { album.isEmpty ? "Unknown Album" : album }
+    /// Credited artists, split on "feat." and list separators ("A feat. B", "A, B" → ["A", "B"]).
+    var artistNames: [String] {
+        var text = artist
+        for separator in [" (feat. ", " (ft. ", " (with ", " feat. ", " feat ", " ft. ", " featuring ", ", ", "; ", " / "] {
+            text = text.replacingOccurrences(of: separator, with: "\u{1}", options: .caseInsensitive)
+        }
+        let names = text.components(separatedBy: "\u{1}")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ()[]")) }
+            .filter { !$0.isEmpty }
+        return names.isEmpty ? [artistName] : names
+    }
+    /// Album artist tag, else the first credited artist; groups albums and artists so features don't split them.
+    var leadArtist: String { (albumArtist ?? "").isEmpty ? artistNames[0] : albumArtist! }
 }
 
 final class LibraryStore {
@@ -80,7 +95,7 @@ final class LibraryStore {
                 }
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
-                if let old = known[url.path], old.modified == modified, old.discNumber != nil,
+                if let old = known[url.path], old.modified == modified, old.albumArtist != nil,
                    old.coverPath.map({ fm.fileExists(atPath: $0) }) ?? true {
                     result.append(old)
                     continue
@@ -179,11 +194,14 @@ final class LibraryStore {
 
     private func read(_ url: URL, modified: Double) -> LibraryItem {
         let name = url.deletingPathExtension().lastPathComponent
-        var item = LibraryItem(path: url.path, title: name, artist: "", album: "", coverPath: nil, modified: modified, trackNumber: 0, discNumber: 0)
+        var item = LibraryItem(path: url.path, title: name, artist: "", album: "", coverPath: nil, modified: modified, trackNumber: 0, discNumber: 0, albumArtist: "")
         let meta = jsonMap(try? Lite.shared.backend.readFileMetadata(path: url.path, hint: url.lastPathComponent))
         for key in ["title", "track_name", "name"] where !meta.str(key).isEmpty { item.title = meta.str(key); break }
         for key in ["artist", "artist_name", "artists"] where !meta.str(key).isEmpty { item.artist = meta.str(key); break }
         for key in ["album", "album_name"] where !meta.str(key).isEmpty { item.album = meta.str(key); break }
+        for key in ["album_artist", "albumartist", "album_artist_name"] where !meta.str(key).isEmpty {
+            item.albumArtist = meta.str(key); break
+        }
         for key in ["track_number", "track", "tracknumber"] where meta.int(key) > 0 { item.trackNumber = meta.int(key); break }
         for key in ["disc_number", "disc", "discnumber"] where meta.int(key) > 0 { item.discNumber = meta.int(key); break }
         if url.pathExtension.lowercased() == "caf" {
@@ -205,9 +223,13 @@ final class LibraryStore {
         return item
     }
 
-    func delete(_ item: LibraryItem) {
-        try? FileManager.default.removeItem(atPath: item.path)
-        items.removeAll { $0.path == item.path }
+    func delete(_ item: LibraryItem) { delete([item]) }
+
+    func delete(_ list: [LibraryItem]) {
+        let paths = Set(list.map { $0.path })
+        for path in paths { try? FileManager.default.removeItem(atPath: path) }
+        items.removeAll { paths.contains($0.path) }
         if let data = try? JSONEncoder().encode(items) { try? data.write(to: indexFile, options: .atomic) }
+        NotificationCenter.default.post(name: Lite.libraryChanged, object: nil)
     }
 }
