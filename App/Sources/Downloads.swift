@@ -62,7 +62,7 @@ final class DownloadManager {
     }
 
     func clearFinished() {
-        jobs.removeAll { $0.done }
+        jobs.removeAll { $0.done && !$0.status.hasPrefix("Converting") }
         notify()
     }
 
