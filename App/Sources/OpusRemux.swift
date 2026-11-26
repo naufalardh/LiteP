@@ -25,6 +25,7 @@ enum OpusRemux {
         defer { opus_decoder_destroy(decoder) }
 
         let target = source.deletingPathExtension().appendingPathExtension("m4a")
+        let partial = source.deletingPathExtension().appendingPathExtension("m4a-part")
         var aac = AudioStreamBasicDescription(mSampleRate: 48000, mFormatID: kAudioFormatMPEG4AAC, mFormatFlags: 0,
                                               mBytesPerPacket: 0, mFramesPerPacket: 1024, mBytesPerFrame: 0,
                                               mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 0, mReserved: 0)
@@ -34,7 +35,7 @@ enum OpusRemux {
                                               mBytesPerFrame: UInt32(4 * channels), mChannelsPerFrame: UInt32(channels),
                                               mBitsPerChannel: 32, mReserved: 0)
         var fileRef: ExtAudioFileRef?
-        var status = ExtAudioFileCreateWithURL(target as CFURL, kAudioFileM4AType, &aac, nil,
+        var status = ExtAudioFileCreateWithURL(partial as CFURL, kAudioFileM4AType, &aac, nil,
                                                AudioFileFlags.eraseFile.rawValue, &fileRef)
         guard status == noErr, let file = fileRef else {
             NSLog("MornyeLite: could not create %@ (%d)", target.lastPathComponent, status)
@@ -51,7 +52,10 @@ enum OpusRemux {
             let decoded = Int(packet.withUnsafeBufferPointer { bytes in
                 opus_decode_float(decoder, bytes.baseAddress, Int32(packet.count), &samples, 5760, 0)
             })
-            guard decoded >= 0 else { continue }
+            guard decoded >= 0 else {
+                status = OSStatus(decoded)
+                break
+            }
             let skip = min(decoded, preSkip)
             preSkip -= skip
             let frames = Int(min(Int64(decoded - skip), remaining))
@@ -67,7 +71,14 @@ enum OpusRemux {
         let closed = ExtAudioFileDispose(file)
         guard status == noErr, closed == noErr else {
             NSLog("MornyeLite: AAC encode failed for %@ (%d/%d)", source.lastPathComponent, status, closed)
+            try? FileManager.default.removeItem(at: partial)
+            return nil
+        }
+        do {
             try? FileManager.default.removeItem(at: target)
+            try FileManager.default.moveItem(at: partial, to: target)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
             return nil
         }
         return target
