@@ -137,7 +137,7 @@ final class DownloadManager {
                         job.status = opus ? "Converting to AAC…" : finished
                         job.progress = 1
                         job.detail = Self.describe(result, path)
-                        LibraryStore.shared.importDownload(path, tags: Self.tags(job.track, result)) { saved in
+                        LibraryStore.shared.importDownload(path, tags: result["already_exists"] as? Bool == true ? [:] : Self.tags(job.track, result)) { saved in
                             if let saved = saved {
                                 job.filePath = saved
                                 job.status = finished
