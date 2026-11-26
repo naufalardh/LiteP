@@ -102,20 +102,23 @@ final class Lite {
            Data(base64Encoded: key)?.count == 32 {
             return key
         }
+        // Fake-signed (jailbreak) installs may lack the keychain entitlement; the key then lives in a file.
+        let file = dataDir.appendingPathComponent(".master_key")
+        var key = ""
+        if let saved = try? String(contentsOf: file, encoding: .utf8), Data(base64Encoded: saved)?.count == 32 {
+            key = saved
+        } else {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            key = Data(bytes).base64EncodedString()
+        }
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account] as CFDictionary)
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        let key = Data(bytes).base64EncodedString()
         let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account,
                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
                                   kSecValueData as String: Data(key.utf8)]
-        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess { return key }
-        // Fake-signed (jailbreak) installs have no keychain entitlement; keep the key in a file instead.
-        let file = dataDir.appendingPathComponent(".master_key")
-        if let saved = try? String(contentsOf: file, encoding: .utf8), Data(base64Encoded: saved)?.count == 32 {
-            return saved
+        if SecItemAdd(add as CFDictionary, nil) != errSecSuccess {
+            try? Data(key.utf8).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
-        try? Data(key.utf8).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         return key
     }
 }
