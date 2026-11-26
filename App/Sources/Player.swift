@@ -167,8 +167,10 @@ final class Player: NSObject {
     }
 
     private func checkCrossfade() {
-        let fade = Double(Player.crossfade)
-        guard fade > 0, outgoing == nil, isPlaying, repeatMode != 2, duration > fade * 2, position >= duration - fade else { return }
+        let setting = Double(Player.crossfade)
+        guard setting > 0, outgoing == nil, isPlaying, repeatMode != 2, duration > setting + 1, position >= duration - setting else { return }
+        // The observer fires every 0.5 s, so fit the ramp into what is actually left of the song.
+        let fade = max(0.2, min(setting, duration - position))
         let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
         guard nextIndex >= 0 else { return }
         let old = player
