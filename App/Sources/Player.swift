@@ -58,8 +58,11 @@ final class Player: NSObject {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) { [weak self] _ in self?.update() }
     }
 
-    @objc private func ended() {
-        if index + 1 < queue.count { next() } else { update() }
+    @objc private func ended(_ note: Notification) {
+        DispatchQueue.main.async {
+            guard (note.object as? AVPlayerItem) === self.player.currentItem else { return }
+            if self.index + 1 < self.queue.count { self.next() } else { self.update() }
+        }
     }
 
     private func update() {
