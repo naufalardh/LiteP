@@ -134,7 +134,8 @@ enum OpusRemux {
             pos += length
             return value
         }
-        func walk(_ start: Int, _ end: Int) {
+        func walk(_ start: Int, _ end: Int, _ depth: Int) {
+            guard depth < 8 else { failed = true; return }
             var pos = start
             while pos < end && !failed {
                 guard let id = vint(&pos, keepMarker: true), let size = vint(&pos, keepMarker: false) else { failed = true; return }
@@ -144,8 +145,9 @@ enum OpusRemux {
                 switch UInt32(truncatingIfNeeded: id) {
                 case let m where masters.contains(m):
                     if m == 0xAE { trackNumber = 0; codec = "" }
-                    walk(pos, bodyEnd)
-                    if m == 0xAE && codec == "A_OPUS" { opusTrack = trackNumber }
+                    walk(pos, bodyEnd, depth + 1)
+                    // Only audio-only Opus files are converted, so videos and multi-track files keep their original.
+                    if m == 0xAE { if codec == "A_OPUS" && opusTrack == nil { opusTrack = trackNumber } else { failed = true } }
                 case 0xD7: trackNumber = leaf().reduce(0) { $0 << 8 | UInt64($1) }
                 case 0x86: codec = String(bytes: leaf(), encoding: .ascii) ?? ""
                 case 0x63A2: if codec.isEmpty || codec == "A_OPUS" { head = leaf() }
@@ -162,7 +164,7 @@ enum OpusRemux {
                 pos = bodyEnd
             }
         }
-        walk(0, bytes.count)
+        walk(0, bytes.count, 0)
         guard !failed, opusTrack != nil, !packets.isEmpty else { return nil }
         return Stream(head: head, packets: packets, endGranule: 0)
     }
