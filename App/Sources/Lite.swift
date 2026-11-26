@@ -109,7 +109,13 @@ final class Lite {
         let add: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrAccount as String: account,
                                   kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
                                   kSecValueData as String: Data(key.utf8)]
-        SecItemAdd(add as CFDictionary, nil)
+        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess { return key }
+        // Fake-signed (jailbreak) installs have no keychain entitlement; keep the key in a file instead.
+        let file = dataDir.appendingPathComponent(".master_key")
+        if let saved = try? String(contentsOf: file, encoding: .utf8), Data(base64Encoded: saved)?.count == 32 {
+            return saved
+        }
+        try? Data(key.utf8).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         return key
     }
 }
