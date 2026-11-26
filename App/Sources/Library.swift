@@ -69,6 +69,11 @@ final class LibraryStore {
                              (kAFInfoDictionary_Album, ["album", "album_name"])] {
             if let value = names.map({ meta.str($0) }).first(where: { !$0.isEmpty }) { tags[key] = value }
         }
+        let parts = url.deletingPathExtension().lastPathComponent.components(separatedBy: " - ")
+        if tags[kAFInfoDictionary_Title] == nil, parts.count == 2 {
+            tags[kAFInfoDictionary_Title] = parts[0]
+            if tags[kAFInfoDictionary_Artist] == nil { tags[kAFInfoDictionary_Artist] = parts[1] }
+        }
         let cover = coverDir.appendingPathComponent(sha256Hex(target.path) + ".jpg")
         _ = try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)
         let art = url.deletingPathExtension().appendingPathExtension("jpg")

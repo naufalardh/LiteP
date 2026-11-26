@@ -10,10 +10,15 @@ final class Verification: NSObject {
     func verify(_ extensionId: String, done: @escaping (Bool) -> Void) {
         if waiting[extensionId] != nil { waiting[extensionId]?.append(done); return }
         waiting[extensionId] = [done]
-        Lite.shared.call("getExtensionPendingAuth", ["extension_id": extensionId]) { value, _ in
+        Lite.shared.call("getExtensionPendingAuth", ["extension_id": extensionId]) { value, error in
+            let pending = jsonMap(value)
+            NSLog("MornyeLite verify %@: pending keys=%@ host=%@ error=%@", extensionId, pending.keys.sorted().joined(separator: ","),
+                  URL(string: pending.str("auth_url"))?.host ?? "none", error?.localizedDescription ?? "")
             guard let url = URL(string: jsonMap(value).str("auth_url").trimmingCharacters(in: .whitespaces)),
                   url.scheme != nil else { return self.finish(extensionId, false) }
-            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "mornye") { callback, _ in
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "mornye") { callback, error in
+                NSLog("MornyeLite verify %@: browser returned host=%@ error=%@", extensionId, callback?.host ?? "none",
+                      error.map { "\(($0 as NSError).code)" } ?? "")
                 guard let callback = callback else { return self.finish(extensionId, false) }
                 self.handle(callback) { ok in self.finish(extensionId, ok) }
             }
@@ -31,13 +36,19 @@ final class Verification: NSObject {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         func value(_ name: String) -> String { items.first { $0.name == name }?.value ?? "" }
         let grant = host == "session-grant"
-        let code = grant ? value("grant") : value("code")
+        let code = grant && !value("grant").isEmpty ? value("grant") : value("code")
         let state = value("state")
         Lite.shared.queue.async {
             var ok = false
             if !code.isEmpty && !state.isEmpty {
-                ok = (try? Lite.shared.backend.completeAuthCallback(state: state, code: code, sessionGrant: grant) { _ in }) != nil
+                do {
+                    try Lite.shared.backend.completeAuthCallback(state: state, code: code, sessionGrant: grant) { _ in }
+                    ok = true
+                } catch {
+                    NSLog("MornyeLite verify: callback rejected: %@", "\(error)")
+                }
             }
+            NSLog("MornyeLite verify: callback %@ params=%@ ok=%@", host, items.map { $0.name }.joined(separator: ","), ok ? "yes" : "no")
             DispatchQueue.main.async { done?(ok) }
         }
         return true
