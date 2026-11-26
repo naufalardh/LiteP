@@ -11,6 +11,7 @@ enum OpusRemux {
         var packets: [[UInt8]] = []
         var current: [UInt8] = []
         var serial: UInt32?
+        var granule: Int64 = 0
         var pos = 0
         while pos + 27 <= bytes.count {
             guard bytes[pos] == 0x4F, bytes[pos + 1] == 0x67, bytes[pos + 2] == 0x67, bytes[pos + 3] == 0x53 else { return nil }
@@ -18,17 +19,22 @@ enum OpusRemux {
             let segments = Int(bytes[pos + 26])
             var body = pos + 27 + segments
             guard body <= bytes.count else { break }
-            let own = serial == nil || serial == pageSerial
-            if serial == nil { serial = pageSerial }
+            // Chained or multiplexed streams are left as-is rather than partially converted.
+            if serial != nil && serial != pageSerial { return nil }
+            serial = pageSerial
+            var g: Int64 = 0
+            for i in 0..<8 { g |= Int64(bytes[pos + 6 + i]) << (8 * Int64(i)) }
+            if g >= 0 { granule = g }
             for i in 0..<segments {
                 let length = Int(bytes[pos + 27 + i])
-                guard body + length <= bytes.count else { break }
-                if own { current.append(contentsOf: bytes[body..<body + length]) }
+                guard body + length <= bytes.count else { return nil }
+                current.append(contentsOf: bytes[body..<body + length])
                 body += length
-                if length < 255 && own { packets.append(current); current = [] }
+                if length < 255 { packets.append(current); current = [] }
             }
             pos = body
         }
+        guard pos == bytes.count, current.isEmpty else { return nil }
         guard packets.count > 2, packets[0].count >= 19, packets[0].starts(with: Array("OpusHead".utf8)) else { return nil }
         let head = packets[0]
         let channels = UInt32(head[9])
@@ -55,11 +61,14 @@ enum OpusRemux {
         }
         var count = UInt32(descriptions.count)
         ok = AudioFileWritePackets(out, false, UInt32(payload.count), descriptions, 0, &count, payload) == noErr
-        var table = AudioFilePacketTableInfo(mNumberValidFrames: max(0, totalFrames - Int64(preSkip)), mPrimingFrames: Int32(preSkip), mRemainderFrames: 0)
+        ok = ok && count == UInt32(descriptions.count)
+        let valid = max(0, (granule > 0 ? min(totalFrames, granule) : totalFrames) - Int64(preSkip))
+        var table = AudioFilePacketTableInfo(mNumberValidFrames: valid, mPrimingFrames: Int32(preSkip),
+                                             mRemainderFrames: Int32(max(0, totalFrames - Int64(preSkip) - valid)))
         AudioFileSetProperty(out, kAudioFilePropertyPacketTableInfo, UInt32(MemoryLayout<AudioFilePacketTableInfo>.size), &table)
         var info = tags as CFDictionary
         AudioFileSetProperty(out, kAudioFilePropertyInfoDictionary, UInt32(MemoryLayout<CFDictionary>.size), &info)
-        AudioFileClose(out)
+        ok = AudioFileClose(out) == noErr && ok
         if !ok { try? FileManager.default.removeItem(at: target); return nil }
         return target
     }

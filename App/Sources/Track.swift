@@ -24,7 +24,9 @@ struct Track {
     }
     var albumKey: String {
         if let map = raw["album"] as? [String: Any], !map.str("id").isEmpty { return map.str("id") }
-        return raw.str("album_id").isEmpty ? album.lowercased() : raw.str("album_id")
+        if !raw.str("album_id").isEmpty { return raw.str("album_id") }
+        let albumArtist = raw.str("album_artist").isEmpty ? primaryArtist : raw.str("album_artist")
+        return "\(album.lowercased())\u{1}\(albumArtist.lowercased())"
     }
     var album: String {
         for key in ["album_name", "album"] {
