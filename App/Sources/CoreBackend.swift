@@ -503,7 +503,7 @@ final class RustCoreBackend: CoreBackend {
             sourceDirectory: sources,
             dataDirectory: data,
             masterKey: key,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1",
+            appVersion: Bundle.main.infoDictionary?["MornyeCompatVersion"] as? String ?? "5.4.5",
             timeoutMs: 30000,
             providersJson: arguments["lyrics_providers_json"] as? String ?? "[]",
             optionsJson: arguments["lyrics_options_json"] as? String ?? "{}"

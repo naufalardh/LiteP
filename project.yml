@@ -45,7 +45,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: com.naufalardh.mornyelite
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "5.4.5" # matches vendored Mornye; extensions gate on it
+        MARKETING_VERSION: "0.5"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
         LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend $(SRCROOT)/build/opus

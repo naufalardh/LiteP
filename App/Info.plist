@@ -11,6 +11,8 @@
 	<key>CFBundlePackageType</key><string>APPL</string>
 	<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- Version reported to extensions (they require Mornye 4.5.1+); matches the vendored Mornye. -->
+	<key>MornyeCompatVersion</key><string>5.4.5</string>
 	<key>CFBundleURLTypes</key>
 	<array><dict>
 		<key>CFBundleURLName</key><string>com.naufalardh.mornyelite</string>

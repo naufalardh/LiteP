@@ -74,7 +74,9 @@ final class SettingsViewController: UITableViewController {
         case (2, 0): return Player.crossfade == 0 ? "Off" : "\(Player.crossfade) s"
         case (3, 0): return musicSize
         case (3, 1): return cacheSize
-        case (5, 0): return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        case (5, 0):
+            let info = Bundle.main.infoDictionary ?? [:]
+            return "\(info["CFBundleShortVersionString"] as? String ?? "") · Mornye \(info["MornyeCompatVersion"] as? String ?? "")"
         default: return nil
         }
     }
