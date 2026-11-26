@@ -25,9 +25,12 @@ final class LibraryStore {
         }
     }
 
+    /// Serial so overlapping rescans never convert the same file twice.
+    private let scanQueue = DispatchQueue(label: "mornye.library.scan", qos: .userInitiated)
+
     /// Rescans Documents/Music, reading tags only for new or modified files.
     func scan(done: @escaping () -> Void) {
-        Lite.shared.queue.async {
+        scanQueue.async {
             let fm = FileManager.default
             try? fm.createDirectory(at: self.coverDir, withIntermediateDirectories: true)
             let known = Dictionary(self.items.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
