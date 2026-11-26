@@ -1,0 +1,71 @@
+import AuthenticationServices
+import UIKit
+
+/// Runs an extension's signed-session / OAuth challenge and returns to the app via mornye://.
+final class Verification: NSObject {
+    static let shared = Verification()
+    private var session: ASWebAuthenticationSession?
+    private var waiting: [String: [(Bool) -> Void]] = [:]
+
+    func verify(_ extensionId: String, done: @escaping (Bool) -> Void) {
+        if waiting[extensionId] != nil { waiting[extensionId]?.append(done); return }
+        waiting[extensionId] = [done]
+        Lite.shared.call("getExtensionPendingAuth", ["extension_id": extensionId]) { value, error in
+            let pending = jsonMap(value)
+            NSLog("MornyeLite verify %@: pending keys=%@ host=%@ error=%@", extensionId, pending.keys.sorted().joined(separator: ","),
+                  URL(string: pending.str("auth_url"))?.host ?? "none", error?.localizedDescription ?? "")
+            guard let url = URL(string: jsonMap(value).str("auth_url").trimmingCharacters(in: .whitespaces)),
+                  url.scheme != nil else { return self.finish(extensionId, false) }
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "mornye") { callback, error in
+                NSLog("MornyeLite verify %@: browser returned host=%@ error=%@", extensionId, callback?.host ?? "none",
+                      error.map { "\(($0 as NSError).code)" } ?? "")
+                guard let callback = callback else { return self.finish(extensionId, false) }
+                self.handle(callback) { ok in self.finish(extensionId, ok) }
+            }
+            if #available(iOS 13.0, *) { session.presentationContextProvider = self }
+            self.session = session
+            if !session.start() { self.finish(extensionId, false) }
+        }
+    }
+
+    /// Completes mornye://callback?code=&state= or mornye://session-grant?grant=&state=.
+    @discardableResult
+    func handle(_ url: URL, done: ((Bool) -> Void)? = nil) -> Bool {
+        guard url.scheme?.lowercased() == "mornye",
+              let host = url.host?.lowercased(), host == "callback" || host == "session-grant" else { return false }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func value(_ name: String) -> String { items.first { $0.name == name }?.value ?? "" }
+        let grant = host == "session-grant"
+        let code = grant && !value("grant").isEmpty ? value("grant") : value("code")
+        let state = value("state")
+        Lite.shared.queue.async {
+            var ok = false
+            if !code.isEmpty && !state.isEmpty {
+                do {
+                    try Lite.shared.backend.completeAuthCallback(state: state, code: code, sessionGrant: grant) { _ in }
+                    ok = true
+                } catch {
+                    NSLog("MornyeLite verify: callback rejected: %@", "\(error)")
+                }
+            }
+            NSLog("MornyeLite verify: callback %@ params=%@ ok=%@", host, items.map { $0.name }.joined(separator: ","), ok ? "yes" : "no")
+            DispatchQueue.main.async { done?(ok) }
+        }
+        return true
+    }
+
+    private func finish(_ extensionId: String, _ ok: Bool) {
+        DispatchQueue.main.async {
+            self.session = nil
+            let callbacks = self.waiting.removeValue(forKey: extensionId) ?? []
+            callbacks.forEach { $0(ok) }
+        }
+    }
+}
+
+@available(iOS 13.0, *)
+extension Verification: ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.keyWindow ?? ASPresentationAnchor()
+    }
+}
