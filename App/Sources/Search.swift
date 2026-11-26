@@ -70,7 +70,6 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
 
     @objc private func updateSource() {
         let match = Lite.shared.searchExtensions.first { $0.str("id") == sourceId }
-        if match == nil { sourceId = "" }
         navigationItem.rightBarButtonItem?.title = match?.extName ?? "All sources"
     }
 
@@ -115,10 +114,10 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
             self.message = error?.localizedDescription ?? (self.results.isEmpty ? "No results for \"\(query)\"" : "")
             self.tableView.reloadData()
         }
-        if sourceId.isEmpty {
+        let source = Lite.shared.searchExtensions.first { $0.str("id") == sourceId }
+        if source == nil {
             Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 100, "include_extensions": true], done: done)
-        } else if let ext = Lite.shared.searchExtensions.first(where: { $0.str("id") == sourceId }),
-                  (ext["search_behavior"] as? [String: Any])?["enabled"] as? Bool != true {
+        } else if (source?["search_behavior"] as? [String: Any])?["enabled"] as? Bool != true {
             Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 100], done: done)
         } else {
             Lite.shared.call("customSearchWithExtension", ["extension_id": sourceId, "query": query, "options": "{}",
