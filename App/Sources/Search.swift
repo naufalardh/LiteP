@@ -36,22 +36,20 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
     }
 
     private var groups: [Group] {
-        let key: (Track) -> String = modes.selectedSegmentIndex == 1
-            ? { $0.artist.components(separatedBy: ", ").first ?? $0.artist }
-            : { $0.album.isEmpty ? "" : "\($0.album)\u{1}\($0.artist)" }
+        let artists = modes.selectedSegmentIndex == 1
         var order: [String] = []
         var map: [String: [Track]] = [:]
         for track in results {
-            let k = key(track)
+            let k = artists ? track.primaryArtist : (track.album.isEmpty ? "" : track.albumKey)
             guard !k.isEmpty else { continue }
             if map[k] == nil { order.append(k) }
             map[k, default: []].append(track)
         }
         return order.map { k in
             let tracks = map[k] ?? []
-            let parts = k.components(separatedBy: "\u{1}")
             let count = "\(tracks.count) song\(tracks.count == 1 ? "" : "s")"
-            return Group(name: parts[0], detail: parts.count > 1 ? "\(parts[1]) · \(count)" : count, tracks: tracks)
+            guard !artists, let first = tracks.first else { return Group(name: k, detail: count, tracks: tracks) }
+            return Group(name: first.album, detail: "\(first.primaryArtist) · \(count)", tracks: tracks)
         }
     }
 

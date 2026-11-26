@@ -13,6 +13,19 @@ struct Track {
         }
         return ""
     }
+    var primaryArtist: String {
+        for key in ["artists", "artist", "artist_name"] {
+            if let list = raw[key] as? [String], let first = list.first { return first }
+            if let list = raw[key] as? [[String: Any]], let first = list.first { return first.str("name") }
+            let value = raw.str(key)
+            if !value.isEmpty { return value }
+        }
+        return ""
+    }
+    var albumKey: String {
+        if let map = raw["album"] as? [String: Any], !map.str("id").isEmpty { return map.str("id") }
+        return raw.str("album_id").isEmpty ? album.lowercased() : raw.str("album_id")
+    }
     var album: String {
         for key in ["album_name", "album"] {
             if let map = raw[key] as? [String: Any] { return map.str("name") }

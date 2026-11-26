@@ -1,3 +1,4 @@
+import AudioToolbox
 import UIKit
 
 struct LibraryItem: Codable {
@@ -33,7 +34,11 @@ final class LibraryStore {
             var result: [LibraryItem] = []
             let root = Lite.shared.music
             let files = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey])
-            while let url = files?.nextObject() as? URL {
+            while var url = files?.nextObject() as? URL {
+                if OpusRemux.extensions.contains(url.pathExtension.lowercased()) {
+                    guard let converted = self.convertOpus(url) else { continue }
+                    url = converted
+                }
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
                 if let old = known[url.path], old.modified == modified,
@@ -53,6 +58,29 @@ final class LibraryStore {
         }
     }
 
+    /// Converts an .opus download to .caf (iOS 12 cannot play Ogg), keeping its tags and cover.
+    private func convertOpus(_ url: URL) -> URL? {
+        let fm = FileManager.default
+        let target = url.deletingPathExtension().appendingPathExtension("caf")
+        if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: url); return target }
+        let meta = jsonMap(try? Lite.shared.backend.readFileMetadata(path: url.path, hint: url.lastPathComponent))
+        var tags: [String: String] = [:]
+        for (key, names) in [(kAFInfoDictionary_Title, ["title", "track_name"]), (kAFInfoDictionary_Artist, ["artist", "artist_name"]),
+                             (kAFInfoDictionary_Album, ["album", "album_name"])] {
+            if let value = names.map({ meta.str($0) }).first(where: { !$0.isEmpty }) { tags[key] = value }
+        }
+        let cover = coverDir.appendingPathComponent(sha256Hex(target.path) + ".jpg")
+        _ = try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)
+        let art = url.deletingPathExtension().appendingPathExtension("jpg")
+        if fm.fileExists(atPath: cover.path), !fm.fileExists(atPath: art.path) { try? fm.copyItem(at: cover, to: art) }
+        guard let converted = OpusRemux.toCAF(url, tags: tags) else {
+            NSLog("MornyeLite: could not convert %@", url.lastPathComponent)
+            return nil
+        }
+        try? fm.removeItem(at: url)
+        return converted
+    }
+
     private func read(_ url: URL, modified: Double) -> LibraryItem {
         let name = url.deletingPathExtension().lastPathComponent
         var item = LibraryItem(path: url.path, title: name, artist: "", album: "", coverPath: nil, modified: modified)
@@ -60,12 +88,21 @@ final class LibraryStore {
         for key in ["title", "track_name", "name"] where !meta.str(key).isEmpty { item.title = meta.str(key); break }
         for key in ["artist", "artist_name", "artists"] where !meta.str(key).isEmpty { item.artist = meta.str(key); break }
         for key in ["album", "album_name"] where !meta.str(key).isEmpty { item.album = meta.str(key); break }
+        if url.pathExtension.lowercased() == "caf" {
+            let tags = OpusRemux.tags(url)
+            if let v = tags[kAFInfoDictionary_Title], item.title == name { item.title = v }
+            if let v = tags[kAFInfoDictionary_Artist], item.artist.isEmpty { item.artist = v }
+            if let v = tags[kAFInfoDictionary_Album], item.album.isEmpty { item.album = v }
+        }
+        let art = url.deletingPathExtension().appendingPathExtension("jpg")
         let cover = coverDir.appendingPathComponent(sha256Hex(url.path) + ".jpg")
         if FileManager.default.fileExists(atPath: cover.path) {
             item.coverPath = cover.path
         } else if (try? Lite.shared.backend.extractCoverToFile(audioPath: url.path, outputPath: cover.path)) != nil,
                   FileManager.default.fileExists(atPath: cover.path) {
             item.coverPath = cover.path
+        } else if FileManager.default.fileExists(atPath: art.path) {
+            item.coverPath = art.path
         }
         return item
     }

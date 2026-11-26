@@ -76,8 +76,9 @@ final class DownloadManager {
                                                            itemId: job.id, outputDir: Lite.shared.music.path))
         Lite.shared.call("downloadByStrategy", request) { value, error in
             let result = jsonMap(value)
-            NSLog("MornyeLite download [%@] %@ -> %@", job.provider, job.track.title,
-                  error.map { "\($0)" } ?? jsonString(result))
+            NSLog("MornyeLite download [%@] %@ -> success=%@ type=%@ path=%@ error=%@", job.provider, job.track.title,
+                  "\(result["success"] ?? "nil")", result.str("error_type"), result.str("file_path"),
+                  error?.localizedDescription ?? result.str("error"))
             var verify = false
             if job.status != "Cancelled" {
                 let message = result.str("error").isEmpty ? result.str("message") : result.str("error")
@@ -89,6 +90,7 @@ final class DownloadManager {
                 } else if result["success"] as? Bool == true,
                           !result.str("decryption_key").isEmpty || result["decryption"] != nil {
                     job.status = "Failed: track needs decryption, which requires FFmpeg (not included in Lite)"
+                    if !result.str("file_path").isEmpty { try? FileManager.default.removeItem(atPath: result.str("file_path")) }
                 } else if result["success"] as? Bool == true {
                     let reported = result.str("file_path")
                     if let path = Self.placeInLibrary(reported) {
@@ -149,7 +151,9 @@ final class DownloadManager {
         if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber {
             parts.append(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))
         }
-        if !LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) {
+        if OpusRemux.extensions.contains(url.pathExtension.lowercased()) {
+            parts.append("Opus, converted to .caf for iOS 12")
+        } else if !LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) {
             parts.append(".\(url.pathExtension) can't play on iOS 12")
         }
         parts.append(url.lastPathComponent)

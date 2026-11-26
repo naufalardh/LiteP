@@ -2,7 +2,7 @@ import AuthenticationServices
 import UIKit
 
 /// Runs an extension's signed-session / OAuth challenge and returns to the app via mornye://.
-final class Verification {
+final class Verification: NSObject {
     static let shared = Verification()
     private var session: ASWebAuthenticationSession?
     private var waiting: [String: [(Bool) -> Void]] = [:]
@@ -17,6 +17,7 @@ final class Verification {
                 guard let callback = callback else { return self.finish(extensionId, false) }
                 self.handle(callback) { ok in self.finish(extensionId, ok) }
             }
+            if #available(iOS 13.0, *) { session.presentationContextProvider = self }
             self.session = session
             if !session.start() { self.finish(extensionId, false) }
         }
@@ -48,5 +49,12 @@ final class Verification {
             let callbacks = self.waiting.removeValue(forKey: extensionId) ?? []
             callbacks.forEach { $0(ok) }
         }
+    }
+}
+
+@available(iOS 13.0, *)
+extension Verification: ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.keyWindow ?? ASPresentationAnchor()
     }
 }
