@@ -43,7 +43,7 @@ targets:
         PRODUCT_NAME: MornyeLite
         PRODUCT_BUNDLE_IDENTIFIER: com.naufalardh.mornyelite
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "5.4.5" # matches vendored Mornye; extensions gate on it
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
         LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend
