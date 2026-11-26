@@ -45,6 +45,16 @@ final class Player: NSObject {
         load()
     }
 
+    /// Plays in random order; turning shuffle off afterwards restores the list's order.
+    func shuffle(_ items: [LibraryItem]) {
+        guard !items.isEmpty else { return }
+        shuffled = true
+        original = items
+        queue = items.shuffled()
+        index = 0
+        load()
+    }
+
     func toggleShuffle() {
         shuffled.toggle()
         if shuffled {

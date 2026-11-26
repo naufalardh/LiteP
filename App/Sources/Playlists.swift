@@ -280,7 +280,7 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if mode == 3 {
-            if indexPath.row == 0 { Player.shared.play(songs.shuffled(), at: 0) } else { Player.shared.play(songs, at: indexPath.row - 1) }
+            if indexPath.row == 0 { Player.shared.shuffle(songs) } else { Player.shared.play(songs, at: indexPath.row - 1) }
             return
         }
         let row = rows[indexPath.row]
@@ -443,7 +443,7 @@ final class SongListViewController: UITableViewController {
     }
 
     @objc private func playAll() { if !songs.isEmpty { Player.shared.play(songs, at: 0) } }
-    @objc private func shuffleAll() { if !songs.isEmpty { Player.shared.play(songs.shuffled(), at: 0) } }
+    @objc private func shuffleAll() { if !songs.isEmpty { Player.shared.shuffle(songs) } }
 
     @objc private func addSongs() {
         guard let id = playlistId else { return }
