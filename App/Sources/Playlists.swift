@@ -214,7 +214,7 @@ final class LibraryViewController: UITableViewController, UISearchResultsUpdatin
             let artist = mode == 0
             list = SongListViewController(title: row.title, grouped: artist) {
                 let items = LibraryStore.shared.items.filter {
-                    let same = { (x: String, y: String) in x.caseInsensitiveCompare(y) == .orderedSame }
+                    let same = { (x: String, y: String) in x.lowercased() == y.lowercased() }
                     return artist ? $0.artistName == row.title
                         : same($0.albumName, row.title) && same($0.artistName, row.items[0].artistName)
                 }
@@ -300,7 +300,7 @@ final class SongListViewController: UITableViewController {
         songs = load()
         sections = []
         for item in songs {
-            if grouped, let last = sections.last, last.0 == item.albumName {
+            if grouped, let last = sections.last, last.0.lowercased() == item.albumName.lowercased() {
                 sections[sections.count - 1].1.append(item)
             } else if grouped || sections.isEmpty {
                 sections.append((item.albumName, [item]))
