@@ -149,7 +149,7 @@ extension UIViewController {
         a.addAction(UIAlertAction(title: "Save", style: .default) { _ in
             let v = (a.textFields ?? []).map { ($0.text ?? "").trimmingCharacters(in: .whitespaces) }
             guard v.count == 3 else { return }
-            LibraryStore.shared.editTags(item, ["title": v[0], "artist": v[1], "album": v[2], "album_artist": v[1]]) { ok in
+            LibraryStore.shared.editTags(item, ["title": v[0], "artist": v[1], "album": v[2]]) { ok in
                 if !ok { self.alert("Couldn't save", "This file's tags can't be edited.") }
             }
         })

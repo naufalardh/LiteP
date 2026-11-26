@@ -107,8 +107,8 @@ final class LibraryStore {
     }
 
     @discardableResult
-    private func writeTags(_ url: URL, _ tags: [String: String]) -> Bool {
-        let fields = tags.filter { !$0.value.isEmpty }
+    private func writeTags(_ url: URL, _ tags: [String: String], clearEmpty: Bool = false) -> Bool {
+        let fields = clearEmpty ? tags : tags.filter { !$0.value.isEmpty }
         guard !fields.isEmpty, let data = try? JSONSerialization.data(withJSONObject: fields),
               let json = String(data: data, encoding: .utf8) else { return false }
         do {
@@ -123,7 +123,7 @@ final class LibraryStore {
     /// Rewrites a song's tags (Edit song info), then rescans.
     func editTags(_ item: LibraryItem, _ tags: [String: String], done: @escaping (Bool) -> Void) {
         scanQueue.async {
-            let ok = self.writeTags(item.url, tags)
+            let ok = self.writeTags(item.url, tags, clearEmpty: true)
             DispatchQueue.main.async {
                 done(ok)
                 self.scan {}
