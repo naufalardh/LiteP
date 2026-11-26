@@ -52,6 +52,9 @@ final class SearchViewController: UITableViewController, UISearchBarDelegate {
         }
         if sourceId.isEmpty {
             Lite.shared.call("searchTracksWithMetadataProviders", ["query": query, "limit": 30, "include_extensions": true], done: done)
+        } else if let ext = Lite.shared.searchExtensions.first(where: { $0.str("id") == sourceId }),
+                  (ext["search_behavior"] as? [String: Any])?["enabled"] as? Bool != true {
+            Lite.shared.call("searchTracksWithMetadataProvider", ["extension_id": sourceId, "query": query, "limit": 30], done: done)
         } else {
             Lite.shared.call("customSearchWithExtension", ["extension_id": sourceId, "query": query, "options": "{}",
                                                            "request_id": UUID().uuidString], done: done)
