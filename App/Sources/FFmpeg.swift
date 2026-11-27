@@ -87,11 +87,12 @@ enum MovDecrypt {
                         target = URL(fileURLWithPath: "\(base.path) (\(copy))").appendingPathExtension(ext)
                         copy += 1
                     }
+                    // Remove the encrypted file first so a rescan never sees both (and drops the Opus copy).
+                    try? FileManager.default.removeItem(at: source)
                     do { try FileManager.default.moveItem(at: staged, to: target) } catch {
                         try? FileManager.default.removeItem(at: staged)
                         return nil
                     }
-                    try? FileManager.default.removeItem(at: source)
                     return target.path
                 }
                 try? FileManager.default.removeItem(at: staged)
