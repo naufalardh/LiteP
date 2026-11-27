@@ -442,7 +442,10 @@ final class PlayerViewController: UIViewController {
     }
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
-    @objc private func scrubbed() { tick() }
+    @objc private func scrubbed() {
+        // VoiceOver adjusts the value without a touch, so seek right away.
+        if slider.isTracking { tick() } else { scrubEnded() }
+    }
     @objc private func scrubEnded() {
         let target = slider.value
         scrubTarget = target
