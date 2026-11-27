@@ -541,6 +541,7 @@ final class PlayerViewController: UIViewController {
     private let slider = UISlider()
     private var scrubTarget: Float?
     private var previewing = false
+    private var scrubPath: String?
     private let elapsed = Theme.label(12, .regular, Theme.subtext)
     private let remaining = Theme.label(12, .regular, Theme.subtext)
     private let playButton = Theme.circleButton(.play, size: 68, color: .white)
@@ -663,12 +664,14 @@ final class PlayerViewController: UIViewController {
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
     @objc private func scrubReleased() {
         Player.shared.isScrubbing = false
-        commitScrub()
+        // A tap without a drag leaves the thumb at the last tick, a little behind playback.
+        if previewing { commitScrub() }
     }
     /// Dragging only moves the labels (seeking on every move is too heavy for older iPads); the seek happens on release.
     @objc private func scrubbed() {
         Player.shared.isScrubbing = slider.isTracking
         if slider.isTracking {
+            if !previewing { scrubPath = Player.shared.current?.path }
             previewing = true
             tick()
         } else {
@@ -676,7 +679,11 @@ final class PlayerViewController: UIViewController {
         }
     }
     private func commitScrub() {
+        let sameSong = !previewing || scrubPath == Player.shared.current?.path
         previewing = false
+        scrubPath = nil
+        // The song changed mid-drag; the dragged position belonged to the previous one.
+        guard sameSong else { return tick() }
         let target = slider.value
         scrubTarget = target
         tick()
