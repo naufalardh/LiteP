@@ -274,11 +274,35 @@ final class Player: NSObject {
         index -= 1
         load()
     }
+    private var chaseTime: CMTime?
+    private var chaseCompletion: (() -> Void)?
+    private var seeking = false
+
+    /// Coalesces rapid seeks (slider drags): one seek runs at a time and the latest target wins.
     func seek(_ seconds: Double, completion: (() -> Void)? = nil) {
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        chaseTime = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+        chaseCompletion = completion
+        if !seeking { seekToChaseTime() }
+    }
+
+    private func seekToChaseTime() {
+        guard let target = chaseTime else { return }
+        seeking = true
+        let seeker = player
+        seeker.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.update()
-                completion?()
+                guard let self = self else { return }
+                if self.chaseTime == target || self.player !== seeker {
+                    self.chaseTime = nil
+                    self.seeking = false
+                    let completion = self.chaseCompletion
+                    self.chaseCompletion = nil
+                    self.update()
+                    completion?()
+                    if self.chaseTime != nil { self.seekToChaseTime() }
+                } else {
+                    self.seekToChaseTime()
+                }
             }
         }
     }
@@ -352,9 +376,7 @@ final class PlayerViewController: UIViewController {
             UIColor.white.setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 12, height: 12)).fill()
         }, for: .normal)
-        // Preview while dragging; seek once on release so playback doesn't stutter.
         slider.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
-        slider.addTarget(self, action: #selector(scrubEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         remaining.textAlignment = .right
         close.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
@@ -443,12 +465,9 @@ final class PlayerViewController: UIViewController {
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
     @objc private func scrubbed() {
-        // VoiceOver adjusts the value without a touch, so seek right away.
-        if slider.isTracking { tick() } else { scrubEnded() }
-    }
-    @objc private func scrubEnded() {
         let target = slider.value
         scrubTarget = target
+        tick()
         Player.shared.seek(Double(target)) { [weak self] in
             guard let self = self, self.scrubTarget == target else { return }
             self.scrubTarget = nil
