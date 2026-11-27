@@ -11,6 +11,13 @@ final class DownloadJob {
     var detail = ""
     var filePath = ""
     var needsVerification = false
+    private let cancelLock = NSLock()
+    private var cancelRequested = false
+    /// Thread-safe cancel flag for background conversions.
+    var isCancelled: Bool {
+        get { cancelLock.lock(); defer { cancelLock.unlock() }; return cancelRequested }
+        set { cancelLock.lock(); cancelRequested = newValue; cancelLock.unlock() }
+    }
     init(track: Track, provider: String, quality: String) {
         self.track = track
         self.provider = provider
@@ -35,6 +42,7 @@ final class DownloadManager {
         if job.done { jobs.removeAll { $0 === job }; notify(); return }
         Lite.shared.call("cancelDownload", ["item_id": job.id])
         job.status = "Cancelled"
+        job.isCancelled = true
         job.done = true
         notify()
     }
@@ -68,6 +76,7 @@ final class DownloadManager {
             if !job.done {
                 Lite.shared.call("cancelDownload", ["item_id": job.id])
                 job.status = "Cancelled"
+                job.isCancelled = true
                 job.done = true
             } else if deleteFiles, !job.filePath.isEmpty, !job.status.hasPrefix("Failed"),
                       FileManager.default.fileExists(atPath: job.filePath) {
@@ -124,33 +133,32 @@ final class DownloadManager {
                 } else if result["success"] as? Bool != true, Self.needsVerification(result.str("error_type") + " " + message) {
                     job.needsVerification = true
                     verify = true
-                } else if result["success"] as? Bool == true,
-                          !result.str("decryption_key").isEmpty || result["decryption"] != nil {
-                    job.status = "Failed: track needs decryption, which requires FFmpeg (not included in Lite)"
-                    if !result.str("file_path").isEmpty { try? FileManager.default.removeItem(atPath: result.str("file_path")) }
-                } else if result["success"] as? Bool == true {
-                    let reported = result.str("file_path")
-                    if let path = Self.placeInLibrary(reported) {
-                        let finished = result["already_exists"] as? Bool == true ? "Done · already in library" : "Done"
-                        let opus = OpusRemux.extensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased())
-                        job.filePath = path
-                        job.status = opus ? "Converting to AAC…" : finished
-                        job.progress = 1
-                        job.detail = Self.describe(result, path)
-                        LibraryStore.shared.importDownload(path, tags: result["already_exists"] as? Bool == true ? [:] : Self.tags(job.track, result)) { saved in
-                            if let saved = saved {
-                                job.filePath = saved
-                                job.status = finished
-                                job.detail = Self.describe(result, saved) + (opus ? " · converted from Opus" : "")
-                            } else {
-                                job.status = "Failed: could not convert Opus to AAC"
+                } else if result["success"] as? Bool == true, MovDecrypt.needsDecryption(result) {
+                    let encrypted = result.str("file_path")
+                    if let info = MovDecrypt.descriptor(result), !encrypted.isEmpty {
+                        job.status = "Converting: decrypting…"
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            let path = MovDecrypt.run(input: encrypted, key: info.key, inputFormat: info.inputFormat,
+                                                      outputExtension: info.outputExtension,
+                                                      cancelled: { job.isCancelled })
+                            DispatchQueue.main.async {
+                                if let path = path {
+                                    var decrypted = result
+                                    decrypted["file_path"] = path
+                                    self.finish(job, decrypted)
+                                } else {
+                                    try? FileManager.default.removeItem(atPath: encrypted)
+                                    if job.status != "Cancelled" { job.status = "Failed: could not decrypt the track" }
+                                }
+                                self.notify()
                             }
-                            self.notify()
                         }
                     } else {
-                        job.status = "Failed: extension said done but no file was saved"
-                        job.detail = reported.isEmpty ? "No file path returned" : "Missing: \(reported)"
+                        job.status = "Failed: unsupported decryption method"
+                        if !encrypted.isEmpty { try? FileManager.default.removeItem(atPath: encrypted) }
                     }
+                } else if result["success"] as? Bool == true {
+                    self.finish(job, result)
                 } else {
                     job.status = "Failed: \(message.isEmpty ? "unknown error" : message)"
                     if !result.str("error_type").isEmpty { job.detail = "Error type: \(result.str("error_type"))" }
@@ -163,6 +171,31 @@ final class DownloadManager {
             if verify { self.verifyAndRetry(job) }
             if !self.jobs.contains(where: { !$0.done }) { self.stopPolling() }
             self.pump()
+        }
+    }
+
+    private func finish(_ job: DownloadJob, _ result: [String: Any]) {
+        let reported = result.str("file_path")
+        if let path = Self.placeInLibrary(reported) {
+            let finished = result["already_exists"] as? Bool == true ? "Done · already in library" : "Done"
+            let opus = OpusRemux.extensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased())
+            job.filePath = path
+            job.status = opus ? "Converting to AAC…" : finished
+            job.progress = 1
+            job.detail = Self.describe(result, path)
+            LibraryStore.shared.importDownload(path, tags: result["already_exists"] as? Bool == true ? [:] : Self.tags(job.track, result)) { saved in
+                if let saved = saved {
+                    job.filePath = saved
+                    job.status = finished
+                    job.detail = Self.describe(result, saved) + (opus ? " · converted from Opus" : "")
+                } else {
+                    job.status = "Failed: could not convert Opus to AAC"
+                }
+                self.notify()
+            }
+        } else {
+            job.status = "Failed: extension said done but no file was saved"
+            job.detail = reported.isEmpty ? "No file path returned" : "Missing: \(reported)"
         }
     }
 

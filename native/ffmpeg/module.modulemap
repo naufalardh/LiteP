@@ -1,0 +1,4 @@
+module CLiteFFmpeg {
+    header "lite_ffmpeg.h"
+    export *
+}

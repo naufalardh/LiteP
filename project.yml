@@ -11,7 +11,7 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGN_IDENTITY: ""
-    SWIFT_INCLUDE_PATHS: $(SRCROOT)/build/backend/include $(SRCROOT)/build/opus/include
+    SWIFT_INCLUDE_PATHS: $(SRCROOT)/build/backend/include $(SRCROOT)/build/opus/include $(SRCROOT)/build/ffmpeg/include
     DEAD_CODE_STRIPPING: YES
 targets:
   MornyeBackend:
@@ -48,5 +48,5 @@ targets:
         MARKETING_VERSION: "0.5"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
-        LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend $(SRCROOT)/build/opus
-        OTHER_LDFLAGS: -lmornye_mobile -lopus -lc++ -lresolv -lz
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/build/backend $(SRCROOT)/build/opus $(SRCROOT)/build/ffmpeg
+        OTHER_LDFLAGS: -lmornye_mobile -lopus -lliteffmpeg -lavformat -lavcodec -lswresample -lavutil -lc++ -lresolv -lz

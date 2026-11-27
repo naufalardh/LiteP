@@ -20,7 +20,7 @@ report LiteP issues to Mornye.
   crossfade (1–8 s) or gapless playback, lock-screen controls.
 - Dark, Spotify-style look without blur or heavy animation, to stay light on 1 GB devices.
 
-Not included: lyrics, widgets, casting, Discord, FFmpeg-based decryption, browser verification.
+Not included: lyrics, widgets, casting, Discord, browser verification. FFmpeg is an audio-only build that only remuxes and decrypts (`-c copy`); it does not re-encode.
 
 ## Install
 

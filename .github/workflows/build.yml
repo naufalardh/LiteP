@@ -44,6 +44,14 @@ jobs:
       - name: Build libopus (iOS 12, arm64)
         run: bash scripts/build_opus.sh
 
+      - uses: actions/cache@v4
+        with:
+          path: build/ffmpeg-libs
+          key: ffmpeg-ios12-${{ hashFiles('scripts/build_ffmpeg.sh') }}
+
+      - name: Build audio-only FFmpeg (iOS 12, arm64)
+        run: bash scripts/build_ffmpeg.sh
+
       - name: Build app
         run: |
           xcodegen generate
@@ -65,6 +73,17 @@ jobs:
         with:
           name: MornyeLite-unsigned-ipa
           path: build/MornyeLite-unsigned.ipa
+
+      - name: Publish nightly
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/MornyeLite-unsigned.ipa build/LiteP-nightly-unsigned.ipa
+          gh release delete nightly --cleanup-tag -y || true
+          gh release create nightly build/LiteP-nightly-unsigned.ipa --prerelease --target "$GITHUB_SHA" \
+            --title "LiteP nightly" \
+            --notes "Automatic build of ${GITHUB_REF_NAME} at ${GITHUB_SHA::7}. Untested; use the latest numbered release for a stable build. Unsigned IPA for iOS 12+: sideload with Sideloadly, or ldid -S and install with AppSync Unified."
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
