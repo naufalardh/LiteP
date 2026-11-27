@@ -274,8 +274,13 @@ final class Player: NSObject {
         index -= 1
         load()
     }
-    func seek(_ seconds: Double) {
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) { [weak self] _ in self?.update() }
+    func seek(_ seconds: Double, completion: (() -> Void)? = nil) {
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.update()
+                completion?()
+            }
+        }
     }
 
     @objc private func ended(_ note: Notification) {
@@ -318,6 +323,7 @@ final class PlayerViewController: UIViewController {
     private let titleLabel = Theme.label(22, .bold)
     private let artistLabel = Theme.label(16, .regular, Theme.subtext)
     private let slider = UISlider()
+    private var scrubTarget: Float?
     private let elapsed = Theme.label(12, .regular, Theme.subtext)
     private let remaining = Theme.label(12, .regular, Theme.subtext)
     private let playButton = Theme.circleButton(.play, size: 68, color: .white)
@@ -346,7 +352,9 @@ final class PlayerViewController: UIViewController {
             UIColor.white.setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 12, height: 12)).fill()
         }, for: .normal)
-        slider.addTarget(self, action: #selector(seek), for: .valueChanged)
+        // Preview while dragging; seek once on release so playback doesn't stutter.
+        slider.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
+        slider.addTarget(self, action: #selector(scrubEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         remaining.textAlignment = .right
         close.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
@@ -426,13 +434,24 @@ final class PlayerViewController: UIViewController {
     private func tick() {
         let p = Player.shared
         slider.maximumValue = Float(max(p.duration, 1))
-        if !slider.isTracking { slider.value = Float(p.position) }
-        elapsed.text = clock(p.position)
-        remaining.text = "-" + clock(max(0, p.duration - p.position))
+        let scrubbing = slider.isTracking || scrubTarget != nil
+        if !scrubbing { slider.value = Float(p.position) }
+        let shown = scrubbing ? Double(slider.value) : p.position
+        elapsed.text = clock(shown)
+        remaining.text = "-" + clock(max(0, p.duration - shown))
     }
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
-    @objc private func seek() { Player.shared.seek(Double(slider.value)) }
+    @objc private func scrubbed() { tick() }
+    @objc private func scrubEnded() {
+        let target = slider.value
+        scrubTarget = target
+        Player.shared.seek(Double(target)) { [weak self] in
+            guard let self = self, self.scrubTarget == target else { return }
+            self.scrubTarget = nil
+            self.tick()
+        }
+    }
     @objc private func playTapped() { Player.shared.toggle() }
     @objc private func prevTapped() { Player.shared.previous() }
     @objc private func nextTapped() { Player.shared.next() }
