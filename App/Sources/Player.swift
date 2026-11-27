@@ -168,7 +168,7 @@ final class Player: NSObject {
 
     private func checkCrossfade() {
         let setting = Double(Player.crossfade)
-        guard setting > 0, outgoing == nil, isPlaying, repeatMode != 2, duration > setting + 1, position >= duration - setting else { return }
+        guard setting > 0, outgoing == nil, !isScrubbing, !seeking, isPlaying, repeatMode != 2, duration > setting + 1, position >= duration - setting else { return }
         // The observer fires every 0.5 s, so fit the ramp into what is actually left of the song.
         let fade = max(0.2, min(setting, duration - position))
         let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
@@ -277,6 +277,8 @@ final class Player: NSObject {
     private var chaseTime: CMTime?
     private var chaseCompletion: (() -> Void)?
     private var seeking = false
+    /// Set while the user drags the progress slider, so crossfade doesn't start the next song mid-drag.
+    var isScrubbing = false
 
     /// Coalesces rapid seeks (slider drags): one seek runs at a time and the latest target wins.
     func seek(_ seconds: Double, completion: (() -> Void)? = nil) {
@@ -377,6 +379,7 @@ final class PlayerViewController: UIViewController {
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 12, height: 12)).fill()
         }, for: .normal)
         slider.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
+        slider.addTarget(self, action: #selector(scrubReleased), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         remaining.textAlignment = .right
         close.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
@@ -456,6 +459,7 @@ final class PlayerViewController: UIViewController {
     private func tick() {
         let p = Player.shared
         slider.maximumValue = Float(max(p.duration, 1))
+        Player.shared.isScrubbing = slider.isTracking
         let scrubbing = slider.isTracking || scrubTarget != nil
         if !scrubbing { slider.value = Float(p.position) }
         let shown = scrubbing ? Double(slider.value) : p.position
@@ -464,7 +468,9 @@ final class PlayerViewController: UIViewController {
     }
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
+    @objc private func scrubReleased() { Player.shared.isScrubbing = false }
     @objc private func scrubbed() {
+        Player.shared.isScrubbing = slider.isTracking
         let target = slider.value
         scrubTarget = target
         tick()
