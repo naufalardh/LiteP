@@ -9,6 +9,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
+#include <stdlib.h>
 
 typedef struct {
     lite_ffmpeg_cancelled cancelled;
@@ -47,6 +49,24 @@ static int fail(char *message, size_t size, const char *what, int error) {
     else
         snprintf(message, size, "%s", what);
     return -1;
+}
+
+typedef struct {
+    char dir[PATH_MAX];
+    int (*open)(AVFormatContext *, AVIOContext **, const char *, int, AVDictionary **);
+} Guard;
+
+// Only lets the input (and, for HLS, its segments) be read from the input's own directory tree.
+static int guarded_open(AVFormatContext *s, AVIOContext **pb, const char *url, int flags, AVDictionary **options) {
+    Guard *guard = s->opaque;
+    const char *path = url;
+    if (!strncmp(path, "file:", 5)) path += 5;
+    if (!strncmp(path, "//", 2)) path += 2;
+    char resolved[PATH_MAX];
+    if (!realpath(path, resolved)) return AVERROR(ENOENT);
+    size_t length = strlen(guard->dir);
+    if (strncmp(resolved, guard->dir, length) || (resolved[length] != '/' && length > 1)) return AVERROR(EACCES);
+    return guard->open(s, pb, url, flags, options);
 }
 
 static int is(const char *a, const char *b) { return strcmp(a, b) == 0; }
@@ -117,12 +137,22 @@ int lite_ffmpeg_run(int argc, const char *const *argv, lite_ffmpeg_cancelled can
     AVFormatContext *in = NULL, *out = NULL;
     AVDictionary *options = NULL;
     AVPacket *packet = NULL;
-    int *mapping = NULL, result = -1, error = 0;
+    int *mapping = NULL, mapping_count = 0, result = -1, error = 0;
     const char *stage = "open input";
 
     in = avformat_alloc_context();
     if (!in) { error = AVERROR(ENOMEM); goto end; }
     in->interrupt_callback = (AVIOInterruptCB){interrupted, &interrupt};
+    Guard guard;
+    char *slash;
+    if (!realpath(input, guard.dir) || !(slash = strrchr(guard.dir, '/'))) {
+        error = AVERROR(ENOENT);
+        goto end;
+    }
+    if (slash == guard.dir) slash[1] = 0; else *slash = 0;
+    guard.open = in->io_open;
+    in->opaque = &guard;
+    in->io_open = guarded_open;
     const AVInputFormat *forced = NULL;
     if (input_format && !(forced = av_find_input_format(input_format))) {
         error = AVERROR_DEMUXER_NOT_FOUND;
@@ -144,6 +174,7 @@ int lite_ffmpeg_run(int argc, const char *const *argv, lite_ffmpeg_cancelled can
     out->interrupt_callback = in->interrupt_callback;
     mapping = av_malloc_array(in->nb_streams, sizeof *mapping);
     if (!mapping) { error = AVERROR(ENOMEM); goto end; }
+    mapping_count = in->nb_streams;
     int audio_seen = 0, mapped = 0;
     for (unsigned i = 0; i < in->nb_streams; i++) {
         AVStream *stream = in->streams[i];
@@ -180,7 +211,7 @@ int lite_ffmpeg_run(int argc, const char *const *argv, lite_ffmpeg_cancelled can
         error = av_read_frame(in, packet);
         if (error == AVERROR_EOF) { error = 0; break; }
         if (error < 0) break;
-        int target = packet->stream_index < (int)in->nb_streams ? mapping[packet->stream_index] : -1;
+        int target = packet->stream_index < mapping_count ? mapping[packet->stream_index] : -1;
         if (target < 0) { av_packet_unref(packet); continue; }
         AVStream *source = in->streams[packet->stream_index];
         int64_t offset = av_rescale_q(start, AV_TIME_BASE_Q, source->time_base);
