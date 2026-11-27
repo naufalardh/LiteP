@@ -6,7 +6,7 @@ final class Player: NSObject {
     static let shared = Player()
     static let changed = Notification.Name("LitePlayerChanged")
 
-    /// Preloads the next song in AVQueuePlayer so it starts without a pause.
+    /// Schedules the next song right behind the current one on the same audio node, so there is no gap.
     static var gapless: Bool {
         get { UserDefaults.standard.object(forKey: "gapless") as? Bool ?? true }
         set {
@@ -15,7 +15,7 @@ final class Player: NSObject {
         }
     }
 
-    /// Crossfade length in seconds (0 = off). When on, the next song starts on the second player while volumes ramp.
+    /// Crossfade length in seconds (0 = off). When on, the next song starts on the second node while volumes ramp.
     static var crossfade: Int {
         get { UserDefaults.standard.integer(forKey: "crossfade") }
         set {
@@ -24,17 +24,37 @@ final class Player: NSObject {
         }
     }
 
-    private let players = [AVQueuePlayer(), AVQueuePlayer()]
+    private let engine = AVAudioEngine()
+    private let nodes = [AVAudioPlayerNode(), AVAudioPlayerNode()]
     private var active = 0
-    private var player: AVQueuePlayer { players[active] }
-    private var outgoing: AVQueuePlayer?
+    private var node: AVAudioPlayerNode { nodes[active] }
+    private var outgoing: AVAudioPlayerNode?
     private var fadeTimer: Timer?
-    private var statusObserver: NSKeyValueObservation?
-    private var itemObservers: [NSKeyValueObservation] = []
-    private var timeObservers: [Any] = []
-    private var playing: AVPlayerItem?
-    private var preloaded: AVPlayerItem?
-    private var preloadedIndex = 0
+    private var crossfadeTimer: Timer?
+    /// The song now playing; `startFrame` is where in it the current segment began,
+    /// `segmentStart` the node sample time at which that segment began.
+    private var file: AVAudioFile?
+    private var startFrame: AVAudioFramePosition = 0
+    private var segmentStart: AVAudioFramePosition = 0
+    private var currentToken = -1
+    /// The song scheduled right after `file` on the same node (gapless).
+    private var nextFile: AVAudioFile?
+    private var nextPath: String?
+    private var nextIndex = -1
+    private var nextToken = -1
+    /// Set when the next song has another format and is timed to start on the other node instead.
+    private var nextNode: AVAudioPlayerNode?
+    private var chainPending = false
+    private var resumeAfterInterruption = false
+    private var tokens = 0
+    private var running = false
+    private var needsReschedule = false
+    private var lastPosition = 0.0
+    private var lastSeek = Date.distantPast
+    private var pendingSeek: DispatchWorkItem?
+    /// Set while the user drags the progress slider, so crossfade doesn't start the next song mid-drag.
+    var isScrubbing = false
+
     private var original: [LibraryItem] = []
     private(set) var queue: [LibraryItem] = []
     private(set) var index = 0
@@ -43,31 +63,41 @@ final class Player: NSObject {
     private(set) var repeatMode = 0
     var current: LibraryItem? { queue.indices.contains(index) ? queue[index] : nil }
     var upNext: [LibraryItem] { Array(queue.dropFirst(index + 1)) }
-    var isPlaying: Bool { player.rate > 0 }
-    var position: Double { player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0 }
-    var duration: Double { player.currentItem?.duration.seconds.isFinite == true ? player.currentItem!.duration.seconds : 0 }
+    var isPlaying: Bool { running }
+    var duration: Double {
+        guard let file = file else { return 0 }
+        return Double(file.length) / file.processingFormat.sampleRate
+    }
+    var position: Double {
+        guard let file = file else { return 0 }
+        if running, engine.isRunning, let now = node.lastRenderTime, let time = node.playerTime(forNodeTime: now) {
+            let frames = startFrame + max(0, time.sampleTime - segmentStart)
+            lastPosition = min(Double(frames) / file.processingFormat.sampleRate, duration)
+        }
+        return lastPosition
+    }
 
     private override init() {
         super.init()
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
-        NotificationCenter.default.addObserver(self, selector: #selector(ended), name: .AVPlayerItemDidPlayToEndTime, object: nil)
-        for p in players {
-            itemObservers.append(p.observe(\.currentItem) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.advanced() }
-            })
-            timeObservers.append(p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) {
-                [weak self, weak p] _ in
-                guard let self = self, p === self.player else { return }
-                self.checkCrossfade()
-            })
+        let stereo = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)
+        for (bus, n) in nodes.enumerated() {
+            engine.attach(n)
+            engine.connect(n, to: engine.mainMixerNode, fromBus: 0, toBus: bus, format: stereo)
         }
-        let center = MPRemoteCommandCenter.shared()
-        center.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
-        center.pauseCommand.addTarget { [weak self] _ in self?.pause(); return .success }
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success }
-        center.nextTrackCommand.addTarget { [weak self] _ in self?.next(); return .success }
-        center.previousTrackCommand.addTarget { [weak self] _ in self?.previous(); return .success }
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
+        engine.prepare()
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(interrupted), name: AVAudioSession.interruptionNotification, object: nil)
+        center.addObserver(self, selector: #selector(routeChanged), name: AVAudioSession.routeChangeNotification, object: nil)
+        center.addObserver(self, selector: #selector(engineReset), name: .AVAudioEngineConfigurationChange, object: engine)
+        crossfadeTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.checkCrossfade() }
+        let remote = MPRemoteCommandCenter.shared()
+        remote.playCommand.addTarget { [weak self] _ in self?.resume(); return .success }
+        remote.pauseCommand.addTarget { [weak self] _ in self?.pause(); return .success }
+        remote.togglePlayPauseCommand.addTarget { [weak self] _ in self?.toggle(); return .success }
+        remote.nextTrackCommand.addTarget { [weak self] _ in self?.next(); return .success }
+        remote.previousTrackCommand.addTarget { [weak self] _ in self?.previous(); return .success }
+        remote.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             self?.seek(event.positionTime)
             return .success
@@ -159,32 +189,223 @@ final class Player: NSObject {
         index = 0
     }
 
-    private func watch(_ playerItem: AVPlayerItem, _ item: LibraryItem) {
-        statusObserver = playerItem.observe(\.status) { observed, _ in
-            guard observed.status == .failed else { return }
-            NSLog("MornyeLite: cannot play %@: %@", item.url.lastPathComponent, "\(observed.error.map { "\($0)" } ?? "unknown")")
+    private func open(_ item: LibraryItem) -> AVAudioFile? {
+        do {
+            return try AVAudioFile(forReading: item.url)
+        } catch {
+            NSLog("MornyeLite: cannot play %@: %@", item.url.lastPathComponent, "\(error)")
+            return nil
         }
     }
 
-    private func checkCrossfade() {
-        let setting = Double(Player.crossfade)
-        guard setting > 0, outgoing == nil, isPlaying, repeatMode != 2, duration > setting + 1, position >= duration - setting else { return }
-        // The observer fires every 0.5 s, so fit the ramp into what is actually left of the song.
-        let fade = max(0.2, min(setting, duration - position))
-        let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
-        guard nextIndex >= 0 else { return }
-        let old = player
-        let incoming = players[1 - active]
-        let item = AVPlayerItem(url: queue[nextIndex].url)
-        incoming.removeAllItems()
-        incoming.volume = 0
-        incoming.actionAtItemEnd = .pause
-        incoming.insert(item, after: nil)
-        active = 1 - active
+    private func sameFormat(_ a: AVAudioFormat, _ b: AVAudioFormat) -> Bool {
+        a.sampleRate == b.sampleRate && a.channelCount == b.channelCount
+    }
+
+    private func connect(_ n: AVAudioPlayerNode, _ format: AVAudioFormat) {
+        guard !sameFormat(n.outputFormat(forBus: 0), format), let bus = nodes.firstIndex(of: n) else { return }
+        engine.connect(n, to: engine.mainMixerNode, fromBus: 0, toBus: bus, format: format)
+    }
+
+    private func startEngine() -> Bool {
+        try? AVAudioSession.sharedInstance().setActive(true)
+        guard !engine.isRunning else { return true }
+        do {
+            try engine.start()
+            return true
+        } catch {
+            NSLog("MornyeLite: audio engine failed to start: %@", "\(error)")
+            return false
+        }
+    }
+
+    /// Starts the current node, or marks playback stopped when audio can't start (e.g. another app holds it).
+    private func playNode() {
+        if startEngine() { node.play() } else { running = false }
+    }
+
+    private func clearChain() {
+        nextNode?.stop()
+        nextNode = nil
+        nextFile = nil
+        nextPath = nil
+        nextToken = -1
+        chainPending = false
+    }
+
+    private func schedule(_ f: AVAudioFile, from frame: AVAudioFramePosition, on n: AVAudioPlayerNode) -> Int {
+        tokens += 1
+        let token = tokens
+        let count = AVAudioFrameCount(max(0, f.length - frame))
+        if count == 0 {
+            DispatchQueue.main.async { self.segmentEnded(token) }
+        } else {
+            n.scheduleSegment(f, startingFrame: frame, frameCount: count, at: nil,
+                              completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                DispatchQueue.main.async { self?.segmentEnded(token) }
+            }
+        }
+        return token
+    }
+
+    private func followingIndex() -> Int {
+        if repeatMode == 2 { return queue.isEmpty ? -1 : index }
+        if index + 1 < queue.count { return index + 1 }
+        return repeatMode == 1 && !queue.isEmpty ? 0 : -1
+    }
+
+    private var wantsChain: Bool { repeatMode == 2 || (Player.gapless && Player.crossfade == 0) }
+
+    /// Queues the following song on the current node, reusing an already opened file when it's the same song.
+    private func chainNext(reusing previous: AVAudioFile? = nil, path previousPath: String? = nil) {
+        clearChain()
+        let following = followingIndex()
+        guard wantsChain, let f = file, following >= 0 else { return }
+        let item = queue[following]
+        guard let next = previousPath == item.path ? previous : open(item) else { return }
+        if sameFormat(next.processingFormat, f.processingFormat) {
+            nextToken = schedule(next, from: 0, on: node)
+        } else {
+            // Another sample rate or channel count: start it on the other node at the moment this song ends.
+            let end = AVAudioTime(sampleTime: segmentStart + f.length - startFrame, atRate: f.processingFormat.sampleRate)
+            guard running, let at = node.nodeTime(forPlayerTime: end), at.isHostTimeValid else {
+                chainPending = running
+                return
+            }
+            let other = nodes[1 - active]
+            other.stop()
+            connect(other, next.processingFormat)
+            other.volume = 1
+            nextToken = schedule(next, from: 0, on: other)
+            other.play(at: AVAudioTime(hostTime: at.hostTime))
+            nextNode = other
+        }
+        nextFile = next
+        nextPath = item.path
+        nextIndex = following
+    }
+
+    /// Reschedules the current song from `frame` (and the following song behind it).
+    private func restart(at frame: AVAudioFramePosition) {
+        guard let f = file else { return }
+        finishFade()
+        let previous = nextFile, previousPath = nextPath
+        clearChain()
+        node.stop()
+        startFrame = min(max(0, frame), f.length)
+        segmentStart = 0
+        lastPosition = Double(startFrame) / f.processingFormat.sampleRate
+        currentToken = schedule(f, from: startFrame, on: node)
+        needsReschedule = false
+        if running { playNode() }
+        chainNext(reusing: previous, path: previousPath)
+    }
+
+    private func load() {
+        guard let item = current else { return }
+        finishFade()
+        clearChain()
+        node.stop()
+        guard let f = open(item) else {
+            file = nil
+            running = false
+            update()
+            return
+        }
+        connect(node, f.processingFormat)
+        file = f
+        running = true
+        restart(at: 0)
+        update()
+    }
+
+    private func segmentEnded(_ token: Int) {
+        guard token == currentToken, engine.isRunning, !needsReschedule else { return }
+        if nextFile != nil, nextToken >= 0, queue.indices.contains(nextIndex) {
+            handOff()
+        } else if repeatMode == 2 {
+            restart(at: 0)
+            update()
+        } else if index + 1 < queue.count || repeatMode == 1 {
+            next()
+        } else {
+            lastPosition = duration
+            running = false
+            engine.pause()
+            update()
+        }
+    }
+
+    /// The end-of-segment callback can arrive late or not at all, so also notice from the clock that the next song started.
+    private func checkHandOff() {
+        guard running, engine.isRunning, !needsReschedule, let f = file, nextFile != nil, nextToken >= 0,
+              queue.indices.contains(nextIndex) else { return }
+        let started: Bool
+        if let other = nextNode {
+            started = other.lastRenderTime.flatMap { other.playerTime(forNodeTime: $0) }.map { $0.sampleTime > 0 } ?? false
+        } else {
+            started = node.lastRenderTime.flatMap { node.playerTime(forNodeTime: $0) }
+                .map { startFrame + $0.sampleTime - segmentStart >= f.length } ?? false
+        }
+        if started { handOff() }
+    }
+
+    /// Gapless hand-off: the next song is already playing, on this node or the other one.
+    private func handOff() {
+        guard let next = nextFile, let f = file else { return }
+        if let other = nextNode, let i = nodes.firstIndex(of: other) {
+            node.stop()
+            active = i
+            segmentStart = 0
+        } else {
+            segmentStart += f.length - startFrame
+        }
+        nextNode = nil
+        startFrame = 0
+        file = next
         index = nextIndex
-        playing = item
-        preloaded = nil
-        watch(item, queue[index])
+        currentToken = nextToken
+        chainNext()
+        update()
+    }
+
+    func preloadNext() {
+        guard file != nil else { return }
+        let following = followingIndex()
+        let wanted = wantsChain && following >= 0 ? queue[following].path : nil
+        if wanted == nextPath {
+            if following >= 0 { nextIndex = following }
+            return
+        }
+        // The chained song changed; reschedule from where we are.
+        let frame = AVAudioFramePosition(position * (file?.processingFormat.sampleRate ?? 0))
+        restart(at: frame)
+    }
+
+    private func checkCrossfade() {
+        checkHandOff()
+        if chainPending, running, nextFile == nil { chainNext() }
+        let setting = Double(Player.crossfade)
+        guard setting > 0, outgoing == nil, !isScrubbing, running, repeatMode != 2,
+              duration > setting + 1, position >= duration - setting else { return }
+        // The check runs every 0.5 s, so fit the ramp into what is actually left of the song.
+        let fade = max(0.2, min(setting, duration - position))
+        let following = followingIndex()
+        guard following >= 0, let f = open(queue[following]) else { return }
+        let old = node
+        currentToken = -1
+        active = 1 - active
+        let incoming = node
+        incoming.stop()
+        connect(incoming, f.processingFormat)
+        incoming.volume = 0
+        file = f
+        index = following
+        startFrame = 0
+        segmentStart = 0
+        lastPosition = 0
+        currentToken = schedule(f, from: 0, on: incoming)
+        chainNext()
         incoming.play()
         outgoing = old
         let start = Date()
@@ -201,66 +422,35 @@ final class Player: NSObject {
         fadeTimer?.invalidate()
         fadeTimer = nil
         if let old = outgoing {
-            old.pause()
-            old.removeAllItems()
+            old.stop()
             old.volume = 1
         }
         outgoing = nil
-        player.volume = 1
-    }
-
-    private func load() {
-        guard let item = current else { return }
-        finishFade()
-        try? AVAudioSession.sharedInstance().setActive(true)
-        let playerItem = AVPlayerItem(url: item.url)
-        preloaded = nil
-        playing = playerItem
-        player.removeAllItems()
-        watch(playerItem, item)
-        player.insert(playerItem, after: nil)
-        preloadNext()
-        player.play()
-        update()
-    }
-
-    /// AVQueuePlayer moved on to the preloaded song by itself.
-    private func advanced() {
-        guard let item = player.currentItem, item !== playing, item === preloaded, queue.indices.contains(preloadedIndex) else { return }
-        index = preloadedIndex
-        playing = item
-        preloaded = nil
-        watch(item, queue[index])
-        preloadNext()
-        update()
-    }
-
-    func preloadNext() {
-        advanced()
-        if let old = preloaded {
-            player.remove(old)
-            preloaded = nil
-        }
-        let nextIndex = index + 1 < queue.count ? index + 1 : (repeatMode == 1 && !queue.isEmpty ? 0 : -1)
-        guard Player.gapless, Player.crossfade == 0, repeatMode != 2, nextIndex >= 0, let playing = playing, player.currentItem === playing else {
-            player.actionAtItemEnd = .pause
-            return
-        }
-        let item = AVPlayerItem(url: queue[nextIndex].url)
-        player.insert(item, after: playing)
-        preloaded = item
-        preloadedIndex = nextIndex
-        player.actionAtItemEnd = .advance
+        node.volume = 1
     }
 
     func toggle() { isPlaying ? pause() : resume() }
     func resume() {
-        if player.currentItem == nil { return load() }
-        if duration > 0 && position >= duration - 0.5 { player.seek(to: .zero) }
-        player.play()
+        guard file != nil else { return load() }
+        running = true
+        if needsReschedule || (duration > 0 && lastPosition >= duration - 0.5) {
+            restart(at: lastPosition >= duration - 0.5 ? 0 : AVAudioFramePosition(lastPosition * file!.processingFormat.sampleRate))
+        } else {
+            playNode()
+            if running, nextFile == nil { chainNext() }
+        }
         update()
     }
-    func pause() { finishFade(); player.pause(); update() }
+    func pause() {
+        finishFade()
+        _ = position
+        running = false
+        // A song timed to start on the other node would fire on schedule; redo it on resume.
+        if nextNode != nil { clearChain() }
+        node.pause()
+        engine.pause()
+        update()
+    }
     func next() {
         if index + 1 < queue.count {
             index += 1
@@ -274,21 +464,52 @@ final class Player: NSObject {
         index -= 1
         load()
     }
-    func seek(_ seconds: Double) {
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600)) { [weak self] _ in self?.update() }
+
+    /// Applies at most one seek per 0.1 s while the slider is dragged; the latest target always lands.
+    func seek(_ seconds: Double, completion: (() -> Void)? = nil) {
+        pendingSeek?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, let f = self.file else { completion?(); return }
+            self.lastSeek = Date()
+            self.restart(at: AVAudioFramePosition(max(0, min(seconds, self.duration)) * f.processingFormat.sampleRate))
+            self.update()
+            completion?()
+        }
+        pendingSeek = work
+        let wait = 0.1 - Date().timeIntervalSince(lastSeek)
+        if wait <= 0 { work.perform() } else { DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work) }
     }
 
-    @objc private func ended(_ note: Notification) {
+    @objc private func interrupted(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         DispatchQueue.main.async {
-            guard (note.object as? AVPlayerItem) === self.playing, self.preloaded == nil else { return }
-            if self.repeatMode == 2 {
-                self.player.seek(to: .zero)
-                self.player.play()
-            } else if self.index + 1 < self.queue.count || self.repeatMode == 1 {
-                self.next()
-            } else {
+            if type == .began {
+                self.resumeAfterInterruption = self.running
+                _ = self.position
+                self.running = false
+                self.needsReschedule = true
                 self.update()
+            } else if let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt,
+                      AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume),
+                      self.resumeAfterInterruption {
+                self.resumeAfterInterruption = false
+                self.resume()
             }
+        }
+    }
+
+    @objc private func routeChanged(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+        DispatchQueue.main.async { if self.running { self.pause() } }
+    }
+
+    /// The engine stops itself when the output hardware changes; pick up where we were.
+    @objc private func engineReset() {
+        DispatchQueue.main.async {
+            self.needsReschedule = true
+            if self.running { self.resume() }
         }
     }
 
@@ -318,6 +539,9 @@ final class PlayerViewController: UIViewController {
     private let titleLabel = Theme.label(22, .bold)
     private let artistLabel = Theme.label(16, .regular, Theme.subtext)
     private let slider = UISlider()
+    private var scrubTarget: Float?
+    private var previewing = false
+    private var scrubPath: String?
     private let elapsed = Theme.label(12, .regular, Theme.subtext)
     private let remaining = Theme.label(12, .regular, Theme.subtext)
     private let playButton = Theme.circleButton(.play, size: 68, color: .white)
@@ -346,7 +570,8 @@ final class PlayerViewController: UIViewController {
             UIColor.white.setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: 12, height: 12)).fill()
         }, for: .normal)
-        slider.addTarget(self, action: #selector(seek), for: .valueChanged)
+        slider.addTarget(self, action: #selector(scrubbed), for: .valueChanged)
+        slider.addTarget(self, action: #selector(scrubReleased), for: [.touchUpInside, .touchUpOutside, .touchCancel])
         remaining.textAlignment = .right
         close.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
@@ -426,13 +651,48 @@ final class PlayerViewController: UIViewController {
     private func tick() {
         let p = Player.shared
         slider.maximumValue = Float(max(p.duration, 1))
-        if !slider.isTracking { slider.value = Float(p.position) }
-        elapsed.text = clock(p.position)
-        remaining.text = "-" + clock(max(0, p.duration - p.position))
+        Player.shared.isScrubbing = slider.isTracking
+        // Release events can be missed; commit a finished drag here instead.
+        if previewing && !slider.isTracking { return commitScrub() }
+        let scrubbing = slider.isTracking || previewing || scrubTarget != nil
+        if !scrubbing { slider.value = Float(p.position) }
+        let shown = scrubbing ? Double(slider.value) : p.position
+        elapsed.text = clock(shown)
+        remaining.text = "-" + clock(max(0, p.duration - shown))
     }
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
-    @objc private func seek() { Player.shared.seek(Double(slider.value)) }
+    @objc private func scrubReleased() {
+        Player.shared.isScrubbing = false
+        // A tap without a drag leaves the thumb at the last tick, a little behind playback.
+        if previewing { commitScrub() }
+    }
+    /// Dragging only moves the labels (seeking on every move is too heavy for older iPads); the seek happens on release.
+    @objc private func scrubbed() {
+        Player.shared.isScrubbing = slider.isTracking
+        if slider.isTracking {
+            if !previewing { scrubPath = Player.shared.current?.path }
+            previewing = true
+            tick()
+        } else {
+            commitScrub()
+        }
+    }
+    private func commitScrub() {
+        let sameSong = !previewing || scrubPath == Player.shared.current?.path
+        previewing = false
+        scrubPath = nil
+        // The song changed mid-drag; the dragged position belonged to the previous one.
+        guard sameSong else { return tick() }
+        let target = slider.value
+        scrubTarget = target
+        tick()
+        Player.shared.seek(Double(target)) { [weak self] in
+            guard let self = self, self.scrubTarget == target else { return }
+            self.scrubTarget = nil
+            self.tick()
+        }
+    }
     @objc private func playTapped() { Player.shared.toggle() }
     @objc private func prevTapped() { Player.shared.previous() }
     @objc private func nextTapped() { Player.shared.next() }

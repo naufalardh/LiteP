@@ -20,11 +20,11 @@ report LiteP issues to Mornye.
   crossfade (1–8 s) or gapless playback, lock-screen controls.
 - Dark, Spotify-style look without blur or heavy animation, to stay light on 1 GB devices.
 
-Not included: lyrics, widgets, casting, Discord, FFmpeg-based decryption, browser verification.
+Not included: lyrics, widgets, casting, Discord, browser verification. FFmpeg is an audio-only build that only remuxes and decrypts (`-c copy`); it does not re-encode.
 
 ## Install
 
-1. Download `LiteP-0.5-unsigned.ipa` from [Releases](../../releases).
+1. Download `LiteP-0.5.1-unsigned.ipa` from [Releases](../../releases).
 2. Jailbroken with AppSync Unified: fake-sign (`ldid -S`) and install, e.g. with `ideviceinstaller`.
    Otherwise sideload with [Sideloadly](https://sideloadly.io) using your Apple ID.
 

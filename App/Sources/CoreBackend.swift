@@ -114,9 +114,9 @@ func executeCoreFFmpegCommand(command: CoreFFmpegCommand, cancelled: @escaping (
     }
 }
 
-// Mornye Lite ships without FFmpeg; extensions that need conversion report failure.
+// LiteP bundles an audio-only FFmpeg that supports stream copy (remux/decrypt), not re-encoding.
 private func executeCoreFFmpeg(arguments: [String], cancelled: @escaping () -> Bool) -> (Bool, String) {
-    return (false, "FFmpeg is not available in Mornye Lite")
+    return LiteFFmpeg.run(arguments, cancelled: cancelled)
 }
 
 func sha256Hex(_ text: String) -> String {
