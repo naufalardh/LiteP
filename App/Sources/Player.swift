@@ -42,6 +42,10 @@ final class Player: NSObject {
     private var nextPath: String?
     private var nextIndex = -1
     private var nextToken = -1
+    /// Set when the next song has another format and is timed to start on the other node instead.
+    private var nextNode: AVAudioPlayerNode?
+    private var chainPending = false
+    private var resumeAfterInterruption = false
     private var tokens = 0
     private var running = false
     private var needsReschedule = false
@@ -203,9 +207,30 @@ final class Player: NSObject {
         engine.connect(n, to: engine.mainMixerNode, fromBus: 0, toBus: bus, format: format)
     }
 
-    private func startEngine() {
+    private func startEngine() -> Bool {
         try? AVAudioSession.sharedInstance().setActive(true)
-        if !engine.isRunning { try? engine.start() }
+        guard !engine.isRunning else { return true }
+        do {
+            try engine.start()
+            return true
+        } catch {
+            NSLog("MornyeLite: audio engine failed to start: %@", "\(error)")
+            return false
+        }
+    }
+
+    /// Starts the current node, or marks playback stopped when audio can't start (e.g. another app holds it).
+    private func playNode() {
+        if startEngine() { node.play() } else { running = false }
+    }
+
+    private func clearChain() {
+        nextNode?.stop()
+        nextNode = nil
+        nextFile = nil
+        nextPath = nil
+        nextToken = -1
+        chainPending = false
     }
 
     private func schedule(_ f: AVAudioFile, from frame: AVAudioFramePosition, on n: AVAudioPlayerNode) -> Int {
@@ -233,18 +258,31 @@ final class Player: NSObject {
 
     /// Queues the following song on the current node, reusing an already opened file when it's the same song.
     private func chainNext(reusing previous: AVAudioFile? = nil, path previousPath: String? = nil) {
-        nextFile = nil
-        nextPath = nil
-        nextToken = -1
+        clearChain()
         let following = followingIndex()
         guard wantsChain, let f = file, following >= 0 else { return }
         let item = queue[following]
-        let candidate = previousPath == item.path ? previous : open(item)
-        guard let next = candidate, sameFormat(next.processingFormat, f.processingFormat) else { return }
+        guard let next = previousPath == item.path ? previous : open(item) else { return }
+        if sameFormat(next.processingFormat, f.processingFormat) {
+            nextToken = schedule(next, from: 0, on: node)
+        } else {
+            // Another sample rate or channel count: start it on the other node at the moment this song ends.
+            let end = AVAudioTime(sampleTime: segmentStart + f.length - startFrame, atRate: f.processingFormat.sampleRate)
+            guard running, let at = node.nodeTime(forPlayerTime: end), at.isHostTimeValid else {
+                chainPending = running
+                return
+            }
+            let other = nodes[1 - active]
+            other.stop()
+            connect(other, next.processingFormat)
+            other.volume = 1
+            nextToken = schedule(next, from: 0, on: other)
+            other.play(at: AVAudioTime(hostTime: at.hostTime))
+            nextNode = other
+        }
         nextFile = next
         nextPath = item.path
         nextIndex = following
-        nextToken = schedule(next, from: 0, on: node)
     }
 
     /// Reschedules the current song from `frame` (and the following song behind it).
@@ -252,25 +290,22 @@ final class Player: NSObject {
         guard let f = file else { return }
         finishFade()
         let previous = nextFile, previousPath = nextPath
+        clearChain()
         node.stop()
         startFrame = min(max(0, frame), f.length)
         segmentStart = 0
         lastPosition = Double(startFrame) / f.processingFormat.sampleRate
         currentToken = schedule(f, from: startFrame, on: node)
-        chainNext(reusing: previous, path: previousPath)
         needsReschedule = false
-        if running {
-            startEngine()
-            node.play()
-        }
+        if running { playNode() }
+        chainNext(reusing: previous, path: previousPath)
     }
 
     private func load() {
         guard let item = current else { return }
         finishFade()
+        clearChain()
         node.stop()
-        nextFile = nil
-        nextPath = nil
         guard let f = open(item) else {
             file = nil
             running = false
@@ -287,8 +322,15 @@ final class Player: NSObject {
     private func segmentEnded(_ token: Int) {
         guard token == currentToken, engine.isRunning, !needsReschedule else { return }
         if let next = nextFile, nextToken >= 0, let f = file, queue.indices.contains(nextIndex) {
-            // Gapless hand-off: the next song is already playing on this node.
-            segmentStart += f.length - startFrame
+            // Gapless hand-off: the next song is already playing, on this node or the other one.
+            if let other = nextNode, let i = nodes.firstIndex(of: other) {
+                node.stop()
+                active = i
+                segmentStart = 0
+            } else {
+                segmentStart += f.length - startFrame
+            }
+            nextNode = nil
             startFrame = 0
             file = next
             index = nextIndex
@@ -303,6 +345,7 @@ final class Player: NSObject {
         } else {
             lastPosition = duration
             running = false
+            engine.pause()
             update()
         }
     }
@@ -321,6 +364,7 @@ final class Player: NSObject {
     }
 
     private func checkCrossfade() {
+        if chainPending, running, nextFile == nil { chainNext() }
         let setting = Double(Player.crossfade)
         guard setting > 0, outgoing == nil, !isScrubbing, running, repeatMode != 2,
               duration > setting + 1, position >= duration - setting else { return }
@@ -372,8 +416,8 @@ final class Player: NSObject {
         if needsReschedule || (duration > 0 && lastPosition >= duration - 0.5) {
             restart(at: lastPosition >= duration - 0.5 ? 0 : AVAudioFramePosition(lastPosition * file!.processingFormat.sampleRate))
         } else {
-            startEngine()
-            node.play()
+            playNode()
+            if running, nextFile == nil { chainNext() }
         }
         update()
     }
@@ -381,6 +425,8 @@ final class Player: NSObject {
         finishFade()
         _ = position
         running = false
+        // A song timed to start on the other node would fire on schedule; redo it on resume.
+        if nextNode != nil { clearChain() }
         node.pause()
         engine.pause()
         update()
@@ -419,12 +465,15 @@ final class Player: NSObject {
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         DispatchQueue.main.async {
             if type == .began {
+                self.resumeAfterInterruption = self.running
                 _ = self.position
                 self.running = false
                 self.needsReschedule = true
                 self.update()
             } else if let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt,
-                      AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume) {
+                      AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume),
+                      self.resumeAfterInterruption {
+                self.resumeAfterInterruption = false
                 self.resume()
             }
         }
