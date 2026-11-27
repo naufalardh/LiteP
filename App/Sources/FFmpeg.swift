@@ -64,13 +64,15 @@ enum MovDecrypt {
         }
         var attempts: [(String, Bool)] = [(preferred, false)]
         if preferred == "flac" { attempts.append(("m4a", false)) }
+        // Opus streams go to Ogg so the library import converts them to AAC for iOS 12.
+        if preferred != "opus" { attempts.append(("opus", false)) }
         if preferred == "flac" || preferred == "m4a" { attempts.append(("mp4", false)) }
         attempts.append(("mp4", true))
         for candidate in keyCandidates(key) {
             for (ext, forceMov) in attempts {
                 if cancelled() { return nil }
-                let staged = base.deletingLastPathComponent()
-                    .appendingPathComponent(".litep-decrypt-\(UUID().uuidString).\(ext)")
+                let staged = URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("litep-decrypt-\(UUID().uuidString).\(ext)")
                 var arguments = ["-v", "error", "-decryption_key", candidate, "-f", format, "-i", input]
                 if ext == "flac" { arguments += ["-map", "0:a"] }
                 arguments += ["-c", "copy"]
@@ -80,8 +82,11 @@ enum MovDecrypt {
                 let size = (try? FileManager.default.attributesOfItem(atPath: staged.path))?[.size] as? NSNumber
                 if ok, (size?.int64Value ?? 0) > 0 {
                     var target = base.appendingPathExtension(ext)
-                    if target.path == input { target = URL(fileURLWithPath: base.path + " (decrypted)").appendingPathExtension(ext) }
-                    try? FileManager.default.removeItem(at: target)
+                    var copy = 2
+                    while target.path == input || FileManager.default.fileExists(atPath: target.path) {
+                        target = URL(fileURLWithPath: "\(base.path) (\(copy))").appendingPathExtension(ext)
+                        copy += 1
+                    }
                     do { try FileManager.default.moveItem(at: staged, to: target) } catch {
                         try? FileManager.default.removeItem(at: staged)
                         return nil
