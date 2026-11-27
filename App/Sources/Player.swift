@@ -321,22 +321,8 @@ final class Player: NSObject {
 
     private func segmentEnded(_ token: Int) {
         guard token == currentToken, engine.isRunning, !needsReschedule else { return }
-        if let next = nextFile, nextToken >= 0, let f = file, queue.indices.contains(nextIndex) {
-            // Gapless hand-off: the next song is already playing, on this node or the other one.
-            if let other = nextNode, let i = nodes.firstIndex(of: other) {
-                node.stop()
-                active = i
-                segmentStart = 0
-            } else {
-                segmentStart += f.length - startFrame
-            }
-            nextNode = nil
-            startFrame = 0
-            file = next
-            index = nextIndex
-            currentToken = nextToken
-            chainNext()
-            update()
+        if nextFile != nil, nextToken >= 0, queue.indices.contains(nextIndex) {
+            handOff()
         } else if repeatMode == 2 {
             restart(at: 0)
             update()
@@ -348,6 +334,39 @@ final class Player: NSObject {
             engine.pause()
             update()
         }
+    }
+
+    /// The end-of-segment callback can arrive late or not at all, so also notice from the clock that the next song started.
+    private func checkHandOff() {
+        guard running, engine.isRunning, !needsReschedule, let f = file, nextFile != nil, nextToken >= 0,
+              queue.indices.contains(nextIndex) else { return }
+        let started: Bool
+        if let other = nextNode {
+            started = other.lastRenderTime.flatMap { other.playerTime(forNodeTime: $0) }.map { $0.sampleTime > 0 } ?? false
+        } else {
+            started = node.lastRenderTime.flatMap { node.playerTime(forNodeTime: $0) }
+                .map { startFrame + $0.sampleTime - segmentStart >= f.length } ?? false
+        }
+        if started { handOff() }
+    }
+
+    /// Gapless hand-off: the next song is already playing, on this node or the other one.
+    private func handOff() {
+        guard let next = nextFile, let f = file else { return }
+        if let other = nextNode, let i = nodes.firstIndex(of: other) {
+            node.stop()
+            active = i
+            segmentStart = 0
+        } else {
+            segmentStart += f.length - startFrame
+        }
+        nextNode = nil
+        startFrame = 0
+        file = next
+        index = nextIndex
+        currentToken = nextToken
+        chainNext()
+        update()
     }
 
     func preloadNext() {
@@ -364,6 +383,7 @@ final class Player: NSObject {
     }
 
     private func checkCrossfade() {
+        checkHandOff()
         if chainPending, running, nextFile == nil { chainNext() }
         let setting = Double(Player.crossfade)
         guard setting > 0, outgoing == nil, !isScrubbing, running, repeatMode != 2,
@@ -520,6 +540,7 @@ final class PlayerViewController: UIViewController {
     private let artistLabel = Theme.label(16, .regular, Theme.subtext)
     private let slider = UISlider()
     private var scrubTarget: Float?
+    private var previewing = false
     private let elapsed = Theme.label(12, .regular, Theme.subtext)
     private let remaining = Theme.label(12, .regular, Theme.subtext)
     private let playButton = Theme.circleButton(.play, size: 68, color: .white)
@@ -630,7 +651,9 @@ final class PlayerViewController: UIViewController {
         let p = Player.shared
         slider.maximumValue = Float(max(p.duration, 1))
         Player.shared.isScrubbing = slider.isTracking
-        let scrubbing = slider.isTracking || scrubTarget != nil
+        // Release events can be missed; commit a finished drag here instead.
+        if previewing && !slider.isTracking { return commitScrub() }
+        let scrubbing = slider.isTracking || previewing || scrubTarget != nil
         if !scrubbing { slider.value = Float(p.position) }
         let shown = scrubbing ? Double(slider.value) : p.position
         elapsed.text = clock(shown)
@@ -638,9 +661,22 @@ final class PlayerViewController: UIViewController {
     }
 
     private func clock(_ s: Double) -> String { String(format: "%d:%02d", Int(s) / 60, Int(s) % 60) }
-    @objc private func scrubReleased() { Player.shared.isScrubbing = false }
+    @objc private func scrubReleased() {
+        Player.shared.isScrubbing = false
+        commitScrub()
+    }
+    /// Dragging only moves the labels (seeking on every move is too heavy for older iPads); the seek happens on release.
     @objc private func scrubbed() {
         Player.shared.isScrubbing = slider.isTracking
+        if slider.isTracking {
+            previewing = true
+            tick()
+        } else {
+            commitScrub()
+        }
+    }
+    private func commitScrub() {
+        previewing = false
         let target = slider.value
         scrubTarget = target
         tick()
