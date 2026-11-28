@@ -190,6 +190,7 @@ final class Player: NSObject {
     }
 
     private func open(_ item: LibraryItem) -> AVAudioFile? {
+        if FragmentedMP4.isFragmented(item.url) { FragmentedMP4.defragment(item.url) }
         do {
             return try AVAudioFile(forReading: item.url)
         } catch {

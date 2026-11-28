@@ -24,7 +24,7 @@ Not included: lyrics, widgets, casting, Discord, browser verification. FFmpeg is
 
 ## Install
 
-1. Download `LiteP-0.5.1-unsigned.ipa` from [Releases](../../releases).
+1. Download `LiteP-0.5.2-unsigned.ipa` from [Releases](../../releases).
 2. Jailbroken with AppSync Unified: fake-sign (`ldid -S`) and install, e.g. with `ideviceinstaller`.
    Otherwise sideload with [Sideloadly](https://sideloadly.io) using your Apple ID.
 
