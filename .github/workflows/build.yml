@@ -25,11 +25,22 @@ jobs:
           xcodebuild -version
 
       - name: Install tools
-        run: |
-          brew install xcodegen
-          cd vendor/Mornye/rust_backend && rustup show
+        run: brew install xcodegen
+
+      - name: Backend version
+        id: mornye
+        run: echo "sha=$(git rev-parse HEAD:vendor/Mornye)" >> "$GITHUB_OUTPUT"
+
+      # The Rust backend and libopus only change with the Mornye submodule or their scripts,
+      # so app-only changes reuse the built libraries and skip ~6 minutes of Rust.
+      - uses: actions/cache@v4
+        id: backend
+        with:
+          path: build/backend
+          key: backend-ios12-${{ steps.mornye.outputs.sha }}-${{ hashFiles('scripts/build_backend.sh') }}
 
       - uses: actions/cache@v4
+        if: steps.backend.outputs.cache-hit != 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -39,9 +50,19 @@ jobs:
           restore-keys: cargo-ios12-
 
       - name: Build Rust backend (iOS 12, arm64)
-        run: bash scripts/build_backend.sh
+        if: steps.backend.outputs.cache-hit != 'true'
+        run: |
+          (cd vendor/Mornye/rust_backend && rustup show)
+          bash scripts/build_backend.sh
+
+      - uses: actions/cache@v4
+        id: opus
+        with:
+          path: build/opus
+          key: opus-ios12-${{ hashFiles('scripts/build_opus.sh') }}
 
       - name: Build libopus (iOS 12, arm64)
+        if: steps.opus.outputs.cache-hit != 'true'
         run: bash scripts/build_opus.sh
 
       - uses: actions/cache@v4
@@ -57,7 +78,7 @@ jobs:
           xcodegen generate
           xcodebuild -project MornyeLite.xcodeproj -scheme MornyeLite -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/dd \
-            CODE_SIGNING_ALLOWED=NO build | tail -200
+            CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build | tail -200
           test "${PIPESTATUS[0]}" = 0
 
       - name: Package unsigned IPA
