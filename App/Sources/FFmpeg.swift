@@ -127,6 +127,7 @@ enum FragmentedMP4 {
         guard ["m4a", "mp4", "aac", "alac"].contains(url.pathExtension.lowercased()),
               let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { handle.closeFile() }
+        let end = handle.seekToEndOfFile()
         var offset: UInt64 = 0
         for _ in 0..<64 {
             handle.seek(toFileOffset: offset)
@@ -139,6 +140,7 @@ enum FragmentedMP4 {
                 guard header.count == 16 else { return false }
                 size = header[8..<16].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
             }
+            guard size >= 8, size <= end - offset else { return false }
             if type == "moov" {
                 // mvex inside moov marks a fragmented file even before the first moof.
                 var child = offset + 8
@@ -148,12 +150,11 @@ enum FragmentedMP4 {
                     guard box.count == 8 else { return false }
                     if String(bytes: box[4..<8], encoding: .ascii) == "mvex" { return true }
                     let length = box[0..<4].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
-                    guard length >= 8 else { return false }
+                    guard length >= 8, length <= offset + size - child else { return false }
                     child += length
                 }
                 return false
             }
-            guard size >= 8 else { return false }
             offset += size
         }
         return false
@@ -162,11 +163,12 @@ enum FragmentedMP4 {
     /// Rewrites the file in place; returns false (leaving it untouched) when remuxing fails.
     @discardableResult
     static func defragment(_ url: URL) -> Bool {
-        let part = url.deletingPathExtension().appendingPathExtension("m4a-part")
+        let part = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).m4a-part")
         defer { try? FileManager.default.removeItem(at: part) }
         let (ok, message) = LiteFFmpeg.run(["-hide_banner", "-nostdin", "-v", "error", "-i", url.path,
                                             "-map", "0:a", "-c", "copy", "-f", "mp4", "-y", part.path])
-        guard ok, rename(part.path, url.path) == 0 else {
+        // The song may have been deleted while it was being remuxed.
+        guard ok, FileManager.default.fileExists(atPath: url.path), rename(part.path, url.path) == 0 else {
             NSLog("LiteP: could not defragment %@: %@", url.lastPathComponent, message)
             return false
         }
