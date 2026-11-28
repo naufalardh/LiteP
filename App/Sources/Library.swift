@@ -70,6 +70,7 @@ final class LibraryStore {
                 }
                 url = converted
             } else if url.pathExtension.lowercased() != "flac" {
+                if FragmentedMP4.isFragmented(url) { FragmentedMP4.defragment(url) }
                 self.writeTags(url, tags)
             }
             DispatchQueue.main.async {
@@ -94,6 +95,9 @@ final class LibraryStore {
                     url = converted
                 }
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
+                if FragmentedMP4.isFragmented(url) {
+                    FragmentedMP4.defragment(url)
+                }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
                 if let old = known[url.path], old.modified == modified, old.albumArtist != nil,
                    old.coverPath.map({ fm.fileExists(atPath: $0) }) ?? true {

@@ -119,3 +119,57 @@ enum MovDecrypt {
         return candidates
     }
 }
+
+/// Fragmented MP4 (e.g. soundcloudlite's joined HLS segments) plays in AVPlayer but not through AVAudioFile on iOS 12,
+/// so it is rewritten as a regular MP4 with stream copy.
+enum FragmentedMP4 {
+    static func isFragmented(_ url: URL) -> Bool {
+        guard ["m4a", "mp4", "aac", "alac"].contains(url.pathExtension.lowercased()),
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { handle.closeFile() }
+        var offset: UInt64 = 0
+        for _ in 0..<64 {
+            handle.seek(toFileOffset: offset)
+            let header = [UInt8](handle.readData(ofLength: 16))
+            guard header.count >= 8 else { return false }
+            var size = header[0..<4].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+            let type = String(bytes: header[4..<8], encoding: .ascii) ?? ""
+            if type == "moof" || type == "mvex" { return true }
+            if size == 1 {
+                guard header.count == 16 else { return false }
+                size = header[8..<16].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+            }
+            if type == "moov" {
+                // mvex inside moov marks a fragmented file even before the first moof.
+                var child = offset + 8
+                while child + 8 <= offset + size {
+                    handle.seek(toFileOffset: child)
+                    let box = [UInt8](handle.readData(ofLength: 8))
+                    guard box.count == 8 else { return false }
+                    if String(bytes: box[4..<8], encoding: .ascii) == "mvex" { return true }
+                    let length = box[0..<4].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+                    guard length >= 8 else { return false }
+                    child += length
+                }
+                return false
+            }
+            guard size >= 8 else { return false }
+            offset += size
+        }
+        return false
+    }
+
+    /// Rewrites the file in place; returns false (leaving it untouched) when remuxing fails.
+    @discardableResult
+    static func defragment(_ url: URL) -> Bool {
+        let part = url.deletingPathExtension().appendingPathExtension("m4a-part")
+        defer { try? FileManager.default.removeItem(at: part) }
+        let (ok, message) = LiteFFmpeg.run(["-hide_banner", "-nostdin", "-v", "error", "-i", url.path,
+                                            "-map", "0:a", "-c", "copy", "-f", "mp4", "-y", part.path])
+        guard ok, rename(part.path, url.path) == 0 else {
+            NSLog("LiteP: could not defragment %@: %@", url.lastPathComponent, message)
+            return false
+        }
+        return true
+    }
+}
