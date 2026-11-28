@@ -95,10 +95,15 @@ final class LibraryStore {
                     url = converted
                 }
                 guard LibraryStore.audioExtensions.contains(url.pathExtension.lowercased()) else { continue }
-                if FragmentedMP4.isFragmented(url), FragmentedMP4.defragment(url),
-                   let cover = known[url.path]?.coverPath, fm.fileExists(atPath: cover) {
-                    // The remux keeps only audio, so put the cached cover back.
-                    self.writeTags(url, ["cover_path": cover])
+                if FragmentedMP4.isFragmented(url) {
+                    let indexed = known[url.path].flatMap { old in
+                        old.modified == (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                            .contentModificationDate?.timeIntervalSince1970 ? old.coverPath : nil
+                    }
+                    // The remux keeps only audio, so put back the cover cached for this same file.
+                    if FragmentedMP4.defragment(url), let cover = indexed, fm.fileExists(atPath: cover) {
+                        self.writeTags(url, ["cover_path": cover])
+                    }
                 }
                 let modified = ((try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()).timeIntervalSince1970
                 if let old = known[url.path], old.modified == modified, old.albumArtist != nil,
